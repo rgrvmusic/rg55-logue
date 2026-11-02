@@ -5,8 +5,8 @@
 #
 #   tools/hostcheck-microkorg2.sh
 #
-# The twin of tools/hostcheck-drumlogue.sh. test/mk2/harness.cc checks the stereo scatter into the voice
-# groups against the engine driven by hand; test/mk2/notes.cc checks that no key leaves a note
+# The twin of tools/hostcheck-drumlogue.sh. test/mk2/harness.cc checks the stereo pair the unit
+# writes against one engine driven by hand; test/mk2/notes.cc checks that no key leaves a note
 # sounding. Both are built from the unit's own unit.cc, header.c and the sources and -D's in its
 # config.mk, with test/mk2/stub/unit_osc.h standing in for the SDK header whose helpers are NEON.
 #
@@ -58,7 +58,7 @@ ROM_LINK_DIR=$(mktemp -d)
 trap 'rm -rf "$ROM_LINK_DIR"' EXIT
 for rom in $ROMS; do ln -s "$SC55_ROM_DIR/$rom" "$ROM_LINK_DIR/$rom"; done
 
-DEFS=($(udefs) -DRFX_USERFS_PROGRAMS_PATH="$ROM_LINK_DIR")
+DEFS=($(udefs) -DRFX_USERFS_PROGRAMS_PATH="$ROM_LINK_DIR" ${EXTRA_DEFS:-})
 INCS=(-Itest/mk2/stub -I"$UNIT" -Icommon -I"$EMUSC_SRC" -I"$SDK_MK2" -I"$SDK_COMMON")
 CXXFLAGS=(-std=gnu++17 -include emusc_compat.h -O1)
 

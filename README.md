@@ -2,31 +2,40 @@ RG-55 for logue
 ===============
 
 
-A monophonic Sound Canvas SC-55 player based on libEmuSC for the KORG drumlogue and
+A Sound Canvas SC-55 player based on libEmuSC for the KORG drumlogue and
 microKORG2.
 
 
 ## Constraints and notes
 
 
-Chorus and reverb have been turned off (disabled at compile time), otherwise
-this unit not be usuable. It always uses libEmuSC part 0, in mono mode: drumlogue
-`GateOn()` sends to that part and a new note stops the one sounding, with no release
-tail under it. The microKORG2 unit sends the keyboard's notes to the same part and
-behaves the same.
+Chorus and reverb are disabled at compile time (`EMUSC_NO_REVERB`,
+`EMUSC_NO_CHORUS`), otherwise this unit is not usable.
 
-The note being stopped is faded out over one 64-frame block first, because
-switching it off, otherwise it will distort: at 25 ms retriggers the cut reaches a
-tenth of full scale. A gate holds the note until the gate ends.
+The drumlogue unit uses libEmuSC part 0 and runs it in mono mode: `GateOn()`
+sends to it, a new note stops the one sounding, and a gate holds its note until
+the gate ends. The note being stopped is faded out over one 64-frame block
+first, because switching it off otherwise distorts: at 25 ms retriggers the cut
+reaches a tenth of full scale.
+
+The microKORG2 unit builds one `EmuSC::Synth` with one part per host voice, on
+MIDI channels 0..7, and writes one stereo pair at `bufferOffset`. A fresh
+`trigger` bit starts that voice's part from `pitch[]`; the note callbacks carry
+key and velocity, and a note-off stops that voice's part. A voice handed a new
+key stops its old note first. The engine's note limit follows the host's voice
+count, so released tails are taken back instead of accumulating. The `trigger`
+bit is not a gate and can fall while a key is held, so only a note-off releases
+a voice. A key pressed and released between two blocks starts nothing.
 
 
 ## How to build
 
 libEmuSC is the `libemusc` submodule, at commit
 `f503c9be3368370920055472599af9f2df78f623`. The build scripts apply the unit's
-patch for you; it enables the one-part build and the
-`EMUSC_NO_REVERB`/`EMUSC_NO_CHORUS` switches, and fixes what GCC 6 and the
-drumlogue's loader reject.
+patch for you. It adds the `EMUSC_MAX_PARTS`, `EMUSC_NO_REVERB` and
+`EMUSC_NO_CHORUS` guards and the sub-block refill, and fixes what GCC 6 and the
+drumlogue's loader reject. The defines come from each unit's `config.mk`:
+`EMUSC_MAX_PARTS=1` for the drumlogue, `8` for the microKORG2.
 
 On the development machine, with a logue SDK checkout at
 `~/Projects/logue/logue-sdk`:
@@ -37,7 +46,7 @@ git submodule update --init libemusc
 ./build-microkorg2.sh
 ```
 
-This will result in the two units: `bin/RG55.drmlgunit` and `bin/RG55.mk2unit` .
+This will result in the two units: `bin/RG55.drmlgunit` and `bin/RG55.mk2unit`.
 
 
 ## How to use
@@ -64,7 +73,7 @@ Before loading the unit, copy the complete user-provided SC-55L set to
 
 ## Disclaimer
 
-This project is pulled out of my experiments for RFX (Regreoove Effects), hence
+This project is pulled out of my experiments for RFX (Regroove Effects), hence
 you will see this namespace used. It has been refactored in to a separate project
 and licensed as MIT.
 

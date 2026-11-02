@@ -60,23 +60,22 @@ ULIBS   = -lm -lc
 # the unit-local compatibility header rather than changing the SDK.
 CXXSTD = -std=gnu++17 -include emusc_compat.h
 
-# The SDK defaults to -Os. libEmuSC renders its 8 ms of audio in one burst every
-# sixth block, so what matters is how long that burst takes against the 1.33 ms
-# a 64-frame block lasts, and -Os does not get it under.
+# The SDK defaults to -Os. libEmuSC renders a 256-sample control block in
+# sub-blocks of 16, and each 64-frame host block draws two or three of them, so
+# what matters is how long a sub-block takes against the 1.33 ms a host block
+# lasts. -Os does not get it under.
 OPTIM = -O3
 
 ##############################################################################
 # Macros
 #
 
-UDEFS = -DUNIT_TARGET_PLATFORM_MICROKORG2 -DEMUSC_MAX_PARTS=1
+UDEFS = -DUNIT_TARGET_PLATFORM_MICROKORG2 -DEMUSC_MAX_PARTS=8
 UDEFS += -DRFX_USERFS_PROGRAMS_PATH=/var/lib/microkorgd/userfs/Programs
 # The SC-55's system effects are eight chorus types and eight reverbs on one
 # bus; the microKORG2's own effects are on the other side of this unit, and the
 # reverb network is the most expensive thing left in the engine.
 UDEFS += -DEMUSC_NO_REVERB
 UDEFS += -DEMUSC_NO_CHORUS
-# Write rg55.log to the userfs: init, then a summary of the render
-# (slowest block, late blocks, peak) when the unit is suspended or torn down.
-# Nothing is logged while audio runs, so a build with this on sounds the same.
-UDEFS += -DRG55_DEBUG
+# The log is off: the userfs is flash, and writing to it wears it out. Build
+# with -DRG55_DEBUG to turn rg55.log back on for a diagnosis.

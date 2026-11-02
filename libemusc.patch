@@ -1,16 +1,34 @@
-# Applies to libEmuSC commit f503c9be3368370920055472599af9f2df78f623.
-#
-# This enables the single-part build used by RGSC55, adds the EMUSC_NO_REVERB
-# and EMUSC_NO_CHORUS switches the unit builds with, renders the SC-55 stream in
-# 64-sample sub-blocks so a host block never takes a whole control period's work,
-# and turns the 32 kHz to host resampler into a rational-phase filter for integer
-# host rates. It also fixes incompatibilities with the drumlogue SDK's ARM C++
-# standard library/compiler and loader.
 diff --git a/libemusc/src/note.cc b/libemusc/src/note.cc
-index 6afb2c2..7dc1a93 100644
+index 6afb2c2..63c118e 100644
 --- a/libemusc/src/note.cc
 +++ b/libemusc/src/note.cc
-@@ -134,7 +134,8 @@ void Note::update(void)
+@@ -31,6 +31,7 @@ Note::Note(uint8_t key, uint8_t velocity, ControlRom &ctrlRom, WaveRom &waveRom,
+   : _key(key),
+     _sustain(false),
+     _stopped(false),
++    _released(false),
+     _7bScale(1/127.0),
+     _settings(settings),
+     _partId(partId)
+@@ -98,6 +99,8 @@ void Note::stop(void)
+ 
+     if (_partial[1])
+       _partial[1]->stop();
++
++    _released = true;
+   }
+ }
+ 
+@@ -113,6 +116,8 @@ void Note::stop(uint8_t key)
+ 
+     if (_partial[1])
+       _partial[1]->stop();
++
++    _released = true;
+   }
+ }
+ 
+@@ -134,7 +139,8 @@ void Note::update(void)
  }
  
  
@@ -20,7 +38,7 @@ index 6afb2c2..7dc1a93 100644
  {
    bool finished[2] = {0, 0};
  
-@@ -143,7 +144,7 @@ bool Note::get_sample_set(std::array<std::array<float, 256>, 2> &dryBus)
+@@ -143,7 +149,7 @@ bool Note::get_sample_set(std::array<std::array<float, 256>, 2> &dryBus)
      if  (_partial[p] == NULL)
        finished[p] = 1;
      else
@@ -30,10 +48,10 @@ index 6afb2c2..7dc1a93 100644
  
    if (finished[0] == true && finished[1] == true)
 diff --git a/libemusc/src/note.h b/libemusc/src/note.h
-index a4b73ca..53787c9 100644
+index a4b73ca..2a747ef 100644
 --- a/libemusc/src/note.h
 +++ b/libemusc/src/note.h
-@@ -47,7 +47,8 @@ public:
+@@ -47,9 +47,11 @@ public:
  
    void update(void);
  
@@ -42,9 +60,20 @@ index a4b73ca..53787c9 100644
 +		      int n, int offset);
  
    int get_num_partials(void);
++  bool is_released(void) const { return _released; }
+ 
+   int get_current_pitch(bool partial);
+   int get_current_tvf(bool partial);
+@@ -61,6 +63,7 @@ private:
+ 
+   bool _sustain;
+   bool _stopped;
++  bool _released;
+ 
+   const double _7bScale;     // Constant: 1 / 127
  
 diff --git a/libemusc/src/part.cc b/libemusc/src/part.cc
-index 1456f76..00119d2 100644
+index 1456f76..7054f84 100644
 --- a/libemusc/src/part.cc
 +++ b/libemusc/src/part.cc
 @@ -48,10 +48,12 @@ Part::~Part()
@@ -110,7 +139,47 @@ index 1456f76..00119d2 100644
    }
  
    // Export envelopes and LFOs to external client
-@@ -370,9 +378,9 @@ int Part::control_change(uint8_t msgId, uint8_t value)
+@@ -166,6 +174,39 @@ int Part::get_last_peak_sample(void)
+ }
+ 
+ 
++/*
++ * Free one voice for a new note. A released note is the right one to take: it
++ * is on its way out, and the list is in order, so the first one found is the
++ * oldest and the quietest. With nothing released the oldest note goes, which
++ * is what the hardware's voice assignment does.
++ */
++bool Part::steal_note(void)
++{
++  _notesMutex->lock();
++
++  Note *victim = nullptr;
++  for (auto &n: _notes) {
++    if (n->is_released()) {
++      victim = n;
++      break;
++    }
++  }
++  if (!victim && !_notes.empty())
++    victim = _notes.front();
++
++  if (victim)
++    _notes.remove(victim);
++
++  _notesMutex->unlock();
++
++  if (!victim)
++    return false;
++
++  delete victim;
++  return true;
++}
++
++
+ int Part::get_num_partials(void)
+ {
+   if (_notes.size() == 0)
+@@ -370,9 +411,9 @@ int Part::control_change(uint8_t msgId, uint8_t value)
    } else if (msgId == 64) {                            // Hold1
      if (_settings->get_param(PatchParam::RxHold1, _id)) {
        if (value < 64) {
@@ -122,7 +191,7 @@ index 1456f76..00119d2 100644
        }
  
        for (auto &n : _notes)
-@@ -383,17 +391,17 @@ int Part::control_change(uint8_t msgId, uint8_t value)
+@@ -383,17 +424,17 @@ int Part::control_change(uint8_t msgId, uint8_t value)
    } else if (msgId == 65) {                            // Portamento
      if (_settings->get_param(PatchParam::RxPortamento, _id)) {
        if (value < 64)
@@ -144,7 +213,7 @@ index 1456f76..00119d2 100644
  
        for (auto &n : _notes)
  	n->sustain(_settings->get_param(PatchParam::Sostenuto, _id));
-@@ -402,9 +410,9 @@ int Part::control_change(uint8_t msgId, uint8_t value)
+@@ -402,9 +443,9 @@ int Part::control_change(uint8_t msgId, uint8_t value)
    } else if (msgId == 67) {                            // Soft
      if (_settings->get_param(PatchParam::RxSoft, _id)) {
        if (value < 64)
@@ -157,10 +226,10 @@ index 1456f76..00119d2 100644
  
    } else if (msgId == 84) {                            // Portamento control
 diff --git a/libemusc/src/part.h b/libemusc/src/part.h
-index 7806e95..9bab649 100644
+index 7806e95..16f7a5e 100644
 --- a/libemusc/src/part.h
 +++ b/libemusc/src/part.h
-@@ -45,7 +45,8 @@ public:
+@@ -45,11 +45,14 @@ public:
  
    int get_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
  		     std::array<std::array<float, 256>, 2> &chrousBus,
@@ -170,6 +239,12 @@ index 7806e95..9bab649 100644
    void update(void);
  
    int get_last_peak_sample(void);
+   int get_num_partials(void);
++  int get_num_notes(void) { return _notes.size(); }
++  bool steal_note(void);
+ 
+   // MIDI Channel Voice Messages
+   int set_program(uint8_t index, int8_t bank = -1, bool ignRxPC = false);
 diff --git a/libemusc/src/partial.cc b/libemusc/src/partial.cc
 index 3236b88..4f1964d 100644
 --- a/libemusc/src/partial.cc
@@ -259,23 +334,25 @@ index 5fcf743..fb5d228 100644
  
  }
 diff --git a/libemusc/src/resampler.cc b/libemusc/src/resampler.cc
-index cf8afb8..0c3a983 100644
+index cf8afb8..50c4c2e 100644
 --- a/libemusc/src/resampler.cc
 +++ b/libemusc/src/resampler.cc
-@@ -31,8 +31,10 @@ namespace EmuSC {
+@@ -31,27 +31,31 @@ namespace EmuSC {
  
  
  Resampler::Resampler()
 -  : _ratio(1.0),
 -    _readPos(static_cast<double>(HALF)),
+-    _writeCount(0)
 +  : _stepNum(1),
 +    _stepDen(1),
 +    _intPos(HALF),
 +    _phaseRem(0),
-     _writeCount(0)
++    _writeCount(0),
++    _mono(false)
  {
    _ringL.fill(0.0f);
-@@ -40,18 +42,19 @@ Resampler::Resampler()
+   _ringR.fill(0.0f);
  
    // Default to a unity-ratio table; set_sample_rate() rebuilds as needed.
    _buildTable(0.5f);
@@ -298,7 +375,17 @@ index cf8afb8..0c3a983 100644
    _writeCount = 0;
    _ringL.fill(0.0f);
    _ringR.fill(0.0f);
-@@ -70,40 +73,97 @@ bool Resampler::get_next_sample(float &outL, float &outR)
+@@ -61,7 +65,8 @@ void Resampler::set_sample_rate(int sampleRate)
+ void Resampler::push(float left, float right)
+ {
+   _ringL[_writeCount & RING_MASK] = left;
+-  _ringR[_writeCount & RING_MASK] = right;
++  if (!_mono)
++    _ringR[_writeCount & RING_MASK] = right;
+   _writeCount++;
+ }
+ 
+@@ -70,40 +75,124 @@ bool Resampler::get_next_sample(float &outL, float &outR)
  {
    // We need HALF input samples of lookahead beyond the read position before
    // an output sample can be produced
@@ -308,62 +395,91 @@ index cf8afb8..0c3a983 100644
  
 -  int i = static_cast<int>(std::floor(_readPos));
 -  double frac = _readPos - i;
--
++  int i = static_cast<int>(_intPos);
+ 
 -  // Polyphase row selection with linear interpolation between rows
 -  double phasePos = frac * NPHASE;
 -  int pidx = static_cast<int>(phasePos);
 -  float pf = static_cast<float>(phasePos - pidx);
--
++  if (_mono) {
++    float acc = 0.0f;
+ 
 -  const float *row0 = &_table[pidx       * TAPS];
 -  const float *row1 = &_table[(pidx + 1) * TAPS];
-+  int i = static_cast<int>(_intPos);
++    if (!_phaseCoeffs.empty()) {
++      const float *row = &_phaseCoeffs[_phaseRem * TAPS];
  
-   float accL = 0.0f;
-   float accR = 0.0f;
+-  float accL = 0.0f;
+-  float accR = 0.0f;
++      for (int k = 0; k < TAPS; ++k)
++        acc += _ringL[(i + k - HALF + 1) & RING_MASK] * row[k];
++    } else {
++      double frac = static_cast<double>(_phaseRem) / _stepDen;
++      double phasePos = frac * NPHASE;
++      int pidx = static_cast<int>(phasePos);
++      float pf = static_cast<float>(phasePos - pidx);
++
++      const float *row0 = &_table[pidx       * TAPS];
++      const float *row1 = &_table[(pidx + 1) * TAPS];
++
++      for (int k = 0; k < TAPS; ++k) {
++        int idx = (i + k - HALF + 1) & RING_MASK;
++        float c = row0[k] + pf * (row1[k] - row0[k]);
++        acc += _ringL[idx] * c;
++      }
++    }
  
 -  for (int k = 0; k < TAPS; ++k) {
 -    int n = k - HALF + 1;
 -    int idx = (i + n) & RING_MASK;
 -    float c = row0[k] + pf * (row1[k] - row0[k]);
-+  if (!_phaseCoeffs.empty()) {
-+    const float *row = &_phaseCoeffs[_phaseRem * TAPS];
-+
-+    for (int k = 0; k < TAPS; ++k) {
-+      int idx = (i + k - HALF + 1) & RING_MASK;
-+      accL += _ringL[idx] * row[k];
-+      accR += _ringR[idx] * row[k];
-+    }
++    outL = outR = acc;
 +  } else {
-+    // Phase does not repeat within the table: interpolate between rows
-+    double frac = static_cast<double>(_phaseRem) / _stepDen;
-+    double phasePos = frac * NPHASE;
-+    int pidx = static_cast<int>(phasePos);
-+    float pf = static_cast<float>(phasePos - pidx);
++    float accL = 0.0f;
++    float accR = 0.0f;
 +
-+    const float *row0 = &_table[pidx       * TAPS];
-+    const float *row1 = &_table[(pidx + 1) * TAPS];
++    if (!_phaseCoeffs.empty()) {
++      const float *row = &_phaseCoeffs[_phaseRem * TAPS];
++
++      for (int k = 0; k < TAPS; ++k) {
++        int idx = (i + k - HALF + 1) & RING_MASK;
++        accL += _ringL[idx] * row[k];
++        accR += _ringR[idx] * row[k];
++      }
++    } else {
++      // Phase does not repeat within the table: interpolate between rows
++      double frac = static_cast<double>(_phaseRem) / _stepDen;
++      double phasePos = frac * NPHASE;
++      int pidx = static_cast<int>(phasePos);
++      float pf = static_cast<float>(phasePos - pidx);
++
++      const float *row0 = &_table[pidx       * TAPS];
++      const float *row1 = &_table[(pidx + 1) * TAPS];
++
++      for (int k = 0; k < TAPS; ++k) {
++        int idx = (i + k - HALF + 1) & RING_MASK;
++        float c = row0[k] + pf * (row1[k] - row0[k]);
++
++        accL += _ringL[idx] * c;
++        accR += _ringR[idx] * c;
++      }
++    }
  
 -    accL += _ringL[idx] * c;
 -    accR += _ringR[idx] * c;
-+    for (int k = 0; k < TAPS; ++k) {
-+      int idx = (i + k - HALF + 1) & RING_MASK;
-+      float c = row0[k] + pf * (row1[k] - row0[k]);
-+
-+      accL += _ringL[idx] * c;
-+      accR += _ringR[idx] * c;
-+    }
++    outL = accL;
++    outR = accR;
    }
  
-   outL = accL;
-   outR = accR;
+-  outL = accL;
+-  outR = accR;
++  _phaseRem += _stepNum;
++  while (_phaseRem >= _stepDen) {
++    _phaseRem -= _stepDen;
++    ++_intPos;
++  }
  
 -  _readPos += _ratio;
-+  _phaseRem += _stepNum;
-+  if (_phaseRem >= _stepDen) {
-+    _intPos += _phaseRem / _stepDen;
-+    _phaseRem %= _stepDen;
-+  }
-+
    return true;
  }
  
@@ -415,18 +531,46 @@ index cf8afb8..0c3a983 100644
  {
    _table.resize((NPHASE + 1) * TAPS);
 diff --git a/libemusc/src/resampler.h b/libemusc/src/resampler.h
-index 59c8a4a..e83f528 100644
+index 59c8a4a..f6923fe 100644
 --- a/libemusc/src/resampler.h
 +++ b/libemusc/src/resampler.h
-@@ -51,10 +51,16 @@ private:
+@@ -39,22 +39,41 @@ public:
+   Resampler();
+ 
+   void set_sample_rate(int sampleRate);
++  /* A lane that is heard on one channel does not need the second one
++   * filtered. The sum is taken before the filter, which gives exactly the
++   * same sample: the same linear filter runs on each channel. */
++  void set_mono(bool mono) { _mono = mono; }
+   void push(float left, float right);
+   bool get_next_sample(float &outL, float &outR);
+ 
+-  // Filter design parameters
+-  static constexpr int   HALF   = 16;    // Taps each side
++  /* The polyphase rows, so a caller that converts several streams at once
++   * uses the same filter as this one. */
++  const std::vector<float> &phase_coeffs(void) const { return _phaseCoeffs; }
++  int step_num(void) const { return _stepNum; }
++  int step_den(void) const { return _stepDen; }
++  static constexpr int taps(void) { return TAPS; }
++
++  // Filter design parameters. 16 taps per output is the cost that fits eight
++  // voices on the microKORG2; images stay below -34 dB above 19 kHz.
++  static constexpr int   HALF   = 8;     // Taps each side
+   static constexpr int   NPHASE = 512;   // Polyphase table resolution
+-  static constexpr float BETA   = 9.0f;  // Kaiser beta (~ -70 dB stopband)
++  static constexpr float BETA   = 6.0f;  // Kaiser beta
+ 
+ private:
    static constexpr int TAPS = 2 * HALF;
    static constexpr int RING = 64;        // Input ring buffer (> 2*HALF, pow2)
    static constexpr int RING_MASK = RING - 1;
-+  static constexpr int MAX_PHASES = 1024;
- 
+-
 -  double _ratio;        // Input samples advanced per output sample (32000/host)
 -  double _readPos;      // Continuous read position (abs. input sample index)
 -  long   _writeCount;   // Total input frames pushed
++  static constexpr int MAX_PHASES = 1024;
++
 +  // Read position as an exact rational: _intPos + _phaseRem / _stepDen input
 +  // samples. With integer rates the phase repeats every _stepDen outputs, so
 +  // the coefficient rows are built once instead of interpolated per output.
@@ -435,10 +579,11 @@ index 59c8a4a..e83f528 100644
 +  long _intPos;
 +  int  _phaseRem;
 +  long _writeCount;     // Total input frames pushed
++  bool _mono;
  
    std::array<float, RING> _ringL;
    std::array<float, RING> _ringR;
-@@ -62,7 +68,12 @@ private:
+@@ -62,7 +81,12 @@ private:
    // Polyphase coefficient table: (NPHASE + 1) rows of TAPS coefficients
    std::vector<float> _table;
  
@@ -628,10 +773,10 @@ index c2d0858..5a1013e 100644
  };
  
 diff --git a/libemusc/src/synth.cc b/libemusc/src/synth.cc
-index 1445030..45ca215 100644
+index 1445030..f80e2cf 100644
 --- a/libemusc/src/synth.cc
 +++ b/libemusc/src/synth.cc
-@@ -39,13 +39,21 @@
+@@ -39,14 +39,25 @@
  
  namespace EmuSC {
  
@@ -642,19 +787,23 @@ index 1445030..45ca215 100644
 +// SC-55 samples are rendered in sub-blocks of this size. Control updates still
 +// fire every 256 samples, but a small sub-block keeps each host block's work
 +// short: the whole 256-sample burst no longer lands in a single render call.
-+#define EMUSC_SUB_BLOCK 64
++#define EMUSC_SUB_BLOCK 16
 +
  Synth::Synth(ControlRom &controlRom, WaveRom &waveRom, SoundMap map)
    : _sampleRate(0),
      _channels(0),
++    _monoOutput(false),
++    _rawOutput(false),
      _numClippedSamples(0),
      _ctrlRom(controlRom),
      _waveRom(waveRom),
 -    _phase(0.0),
      _updateCounter(0),
++    _noteLimit(0),
      _hostSampleBufRIndex(0),
      _hostSampleBufWIndex(0)
-@@ -82,7 +90,7 @@ Synth::~Synth()
+ {
+@@ -82,7 +93,7 @@ Synth::~Synth()
  
  void Synth::_init_parts(void)
  {
@@ -663,16 +812,90 @@ index 1445030..45ca215 100644
      _parts.emplace_back(i, _settings, _ctrlRom, _waveRom);
  }
  
-@@ -304,7 +312,7 @@ int Synth::get_next_frame(float &lOut, float &rOut)
+@@ -103,19 +114,38 @@ void Synth::reset(SoundMap sm, bool resetParts)
+ 
+ void Synth::_add_note(uint8_t midiChannel, uint8_t key, uint8_t velocity)
+ {
+-  int partialsUsed = 0;
+-  for (auto &p: _parts)
+-    partialsUsed += p.get_num_partials();
++  const int noteLimit = _noteLimit > 0 ? _noteLimit :
++    _ctrlRom.max_polyphony();
++  const int partialLimit = noteLimit * 2;
+ 
+   // TODO: Prioritize parts / MIDI channels based on info in owners manual
+-  // FIXME: Reduce voice count when volume envelope is corrected!
+-  if (partialsUsed > _ctrlRom.max_polyphony() * 2)
+-    std::cout << "EmuSC: New note on ignored due to voice limit"
+-	      << std::endl;
+-  else
++  // A part keeps a note until its released tail has fallen, so repeated
++  // playing fills it. Ignoring the new note then leaves the keyboard silent
++  // while the tails die away, so take a voice back instead, as the hardware
++  // does: the oldest released note first, else the oldest note.
++  while (true) {
++    int partialsUsed = 0;
++    int notesUsed = 0;
++    for (auto &p: _parts) {
++      partialsUsed += p.get_num_partials();
++      notesUsed += p.get_num_notes();
++    }
++
++    if (partialsUsed <= partialLimit && notesUsed <= noteLimit)
++      break;
++
++    bool stole = false;
+     for (auto &p: _parts)
+-      if (p.midi_channel() == midiChannel)
+-	p.add_note(key, velocity);
++      if (p.steal_note())
++	stole = true;
++
++    if (!stole)
++      break;
++  }
++
++  for (auto &p: _parts)
++    if (p.midi_channel() == midiChannel)
++      p.add_note(key, velocity);
+ }
+ 
+ /* Not used -> WaveRom as part of sample dump to disk
+@@ -304,12 +334,22 @@ int Synth::get_next_frame(float &lOut, float &rOut)
      return 0;
    }
  
 -  // We are out of samples, trigger new control update + 256 samples @ 32 kHz
-+  // We are out of samples, render the next sub-block of SC-55 samples
-   if (_hostSampleBufWIndex == _hostSampleBufRIndex) {
+-  if (_hostSampleBufWIndex == _hostSampleBufRIndex) {
++  // We are out of samples, render sub-blocks of SC-55 samples until the
++  // resampler produces host samples. A small sub-block can push fewer SC
++  // samples than the resampler's lookahead, so one call is not enough.
++  int guard = 8;
++  while (_hostSampleBufWIndex == _hostSampleBufRIndex && guard-- > 0) {
      _process_samples();
      _hostSampleBufRIndex = 0;
-@@ -336,21 +344,32 @@ uint32_t Synth::get_num_clipped_samples(bool reset)
+   }
+ 
++  // Still nothing after the guard: emit silence rather than run off the
++  // end of the buffer.
++  if (_hostSampleBufWIndex == _hostSampleBufRIndex) {
++    lOut = rOut = 0;
++    return 0;
++  }
++
+   // Check if sound is too loud => clipping
+   if (_hostSampleBufL[_hostSampleBufRIndex] > 1.0f ||
+       _hostSampleBufL[_hostSampleBufRIndex] < -1.0f)
+@@ -328,29 +368,39 @@ int Synth::get_next_frame(float &lOut, float &rOut)
+ 
+ 
+ uint32_t Synth::get_num_clipped_samples(bool reset)
+-{
+-  if (reset)
++{  if (reset)
+     return _numClippedSamples.exchange(0, std::memory_order_relaxed);
+ 
+   return _numClippedSamples.load(std::memory_order_relaxed);
  }
  
  
@@ -692,11 +915,11 @@ index 1445030..45ca215 100644
 +  if (offset == 0) {
 +    for (auto &p : _parts)
 +      p.update();
-+
-+    _systemEffects->update();
-+  }
  
 -  // Clear all relative buffers before accumulating new samples
++    _systemEffects->update();
++  }
++
 +  // Clear this sub-block's slice of the buses before accumulating new samples
 +  std::fill(_dryBus[0].begin() + offset, _dryBus[0].begin() + offset + n, 0.0f);
 +  std::fill(_dryBus[1].begin() + offset, _dryBus[1].begin() + offset + n, 0.0f);
@@ -714,7 +937,7 @@ index 1445030..45ca215 100644
    std::fill(_hostSampleBufL.begin(), _hostSampleBufL.end(), 0.0f);
    std::fill(_hostSampleBufR.begin(), _hostSampleBufR.end(), 0.0f);
  
-@@ -360,17 +379,24 @@ void Synth::_process_samples(void)
+@@ -360,18 +410,37 @@ void Synth::_process_samples(void)
  
    // Iterate all parts and ask for next sample
    for (auto &p : _parts) {
@@ -731,9 +954,6 @@ index 1445030..45ca215 100644
  
    // Work through the dryBus and genereate samples adapted to host's sample rate
 -  for (int i = 0; i < 256; i++) {
--
--    float l = _dryBus[0][i] + _chorusOut[0][i] + _reverbOut[0][i];
--    float r = _dryBus[1][i] + _chorusOut[1][i] + _reverbOut[1][i];
 +  for (int i = offset; i < offset + n; i++) {
 +
 +    float l = _dryBus[0][i];
@@ -742,10 +962,26 @@ index 1445030..45ca215 100644
 +    l += _chorusOut[0][i] + _reverbOut[0][i];
 +    r += _chorusOut[1][i] + _reverbOut[1][i];
 +#endif
-     _resampler->push(l, r);
++    if (_rawOutput) {
++      if (_hostSampleBufWIndex < static_cast<int>(_hostSampleBufL.size())) {
++	_hostSampleBufL[_hostSampleBufWIndex] = (l + r) * 0.5f;
++	_hostSampleBufR[_hostSampleBufWIndex] = 0.0f;
++	_hostSampleBufWIndex++;
++      }
++      continue;
++    }
+ 
+-    float l = _dryBus[0][i] + _chorusOut[0][i] + _reverbOut[0][i];
+-    float r = _dryBus[1][i] + _chorusOut[1][i] + _reverbOut[1][i];
+-    _resampler->push(l, r);
++    if (_monoOutput)
++      _resampler->push((l + r) * 0.5f, 0.0f);
++    else
++      _resampler->push(l, r);
  
      float hostL = 0, hostR = 0;
-@@ -384,6 +410,8 @@ void Synth::_process_samples(void)
+     while (_resampler->get_next_sample(hostL, hostR)) {
+@@ -384,6 +453,8 @@ void Synth::_process_samples(void)
    }
  
    midiMutex.unlock();
@@ -754,7 +990,21 @@ index 1445030..45ca215 100644
  }
  
  
-@@ -410,8 +438,12 @@ void Synth::set_audio_format(uint32_t sampleRate, uint8_t channels)
+@@ -399,6 +470,13 @@ std::array<int, 16> Synth::get_parts_last_peak_sample(void)
+ }
+ 
+ 
++void Synth::set_mono_output(bool mono)
++{
++  _monoOutput = mono;
++  _resampler->set_mono(mono);
++}
++
++
+ void Synth::set_audio_format(uint32_t sampleRate, uint8_t channels)
+ {
+   _resampler->set_sample_rate(sampleRate);
+@@ -410,8 +488,12 @@ void Synth::set_audio_format(uint32_t sampleRate, uint8_t channels)
  
    _init_parts();
  
@@ -769,11 +1019,59 @@ index 1445030..45ca215 100644
  }
  
  
+@@ -428,6 +510,12 @@ void Synth::panic(void)
+ }
+ 
+ 
++void Synth::set_note_limit(int notes)
++{
++  _noteLimit = notes > 0 ? notes : 0;
++}
++
++
+ void Synth::set_part_instrument(uint8_t partId, uint8_t index, uint8_t bank)
+ {
+   _parts[partId].set_program(index, bank, true);
 diff --git a/libemusc/src/synth.h b/libemusc/src/synth.h
-index c22620e..c250eae 100644
+index c22620e..2c5a907 100644
 --- a/libemusc/src/synth.h
 +++ b/libemusc/src/synth.h
-@@ -154,9 +154,7 @@ private:
+@@ -84,10 +84,25 @@ public:
+   // Setting audio properties (default is 44100, 2)
+   void set_audio_format(uint32_t sampleRate, uint8_t channels);
+ 
++  /* Leaves out the second output channel: the resampler filters (L + R) / 2
++   * instead of L and R. Same samples, half the filter work, for a caller
++   * whose output is heard on one channel. */
++  void set_mono_output(bool mono);
++
++  /* Hand out the internal 32 kHz mono stream without the output resampler,
++   * for a caller that converts several streams itself. */
++  void set_raw_output(bool raw) { _rawOutput = raw; }
++
+   void reset(SoundMap sm, bool resetParts = false);
+ 
+   void panic(void);
+ 
++  /* Cap the sounding notes. The SC-55's own limit is the control ROM's, 24
++   * here; a caller with fewer voices pays for every released tail it keeps,
++   * so it can set the number it can render. Older released notes are taken
++   * back first. 0 restores the ROM's limit. */
++  void set_note_limit(int notes);
++
+   // Returns libEmuSC version as a string
+   static std::string version(void);
+ 
+@@ -142,6 +157,8 @@ private:
+   
+   uint32_t _sampleRate;
+   uint8_t _channels;
++  bool _monoOutput;
++  bool _rawOutput;
+ 
+   std::atomic<uint32_t> _numClippedSamples;
+ 
+@@ -154,9 +171,8 @@ private:
    ControlRom &_ctrlRom;
    WaveRom &_waveRom;
  
@@ -781,6 +1079,7 @@ index c22620e..c250eae 100644
 -  float _phaseIncrement;      // SC-55 samples per host sample
 -  int   _updateCounter;       // Counts SC-55 samples, fires at 256
 +  int   _updateCounter;       // SC-55 samples rendered since the last update
++  int   _noteLimit;           // 0: use the control ROM's polyphony
  
    std::vector<float> _hostSampleBufL;
    std::vector<float> _hostSampleBufR;
@@ -866,10 +1165,19 @@ index 056e7af..54ee655 100644
  
  private:
 diff --git a/libemusc/src/tva.cc b/libemusc/src/tva.cc
-index 342a539..4b692d5 100644
+index 342a539..93722bb 100644
 --- a/libemusc/src/tva.cc
 +++ b/libemusc/src/tva.cc
-@@ -49,7 +49,7 @@ TVA::TVA(ControlRom &ctrlRom, uint8_t key, uint8_t velocity, int sampleIndex,
+@@ -40,6 +40,8 @@ TVA::TVA(ControlRom &ctrlRom, uint8_t key, uint8_t velocity, int sampleIndex,
+     _LFO2(LFO2),
+     _lfo1FadeComplete(false),
+     _lfo2FadeComplete(false),
++    _lfo1Depth(0),
++    _lfo2Depth(0),
+     _LUT(ctrlRom.lookupTables),
+     _instPartial(ctrlRom.instrument(instrumentIndex).partials[partialId]),
+     _key(key),
+@@ -49,7 +51,7 @@ TVA::TVA(ControlRom &ctrlRom, uint8_t key, uint8_t velocity, int sampleIndex,
      _settings(settings),
      _partId(partId),
      _dynLevelEC(0), _envLevelEC(0),
@@ -878,7 +1186,7 @@ index 342a539..4b692d5 100644
  {
    int cVelocity = _get_velocity_from_vcurve(velocity);
    _init_envelope(ctrlRom, sampleIndex, instrumentIndex, cVelocity);
-@@ -70,16 +70,19 @@ TVA::TVA(ControlRom &ctrlRom, uint8_t key, uint8_t velocity, int sampleIndex,
+@@ -70,16 +72,19 @@ TVA::TVA(ControlRom &ctrlRom, uint8_t key, uint8_t velocity, int sampleIndex,
  // TVA consists of two values: dynamic volume corrections and envelope level.
  // Each of these levels have their own "mode" variable controlling how they are
  // interpolated / smoothed across and inside control loops of 256 samples.
@@ -902,7 +1210,7 @@ index 342a539..4b692d5 100644
      dryBus[0][i] = sample * panR;
      dryBus[1][i] = sample * panL;
    }
-@@ -661,25 +664,29 @@ void TVA::_slew_function_envelope(uint16_t mode)
+@@ -661,25 +666,29 @@ void TVA::_slew_function_envelope(uint16_t mode)
  // intended target value to avoid drift. We use float and clamp to target
  // (for now).
  void TVA::_smooth(int mode, float start, float target,

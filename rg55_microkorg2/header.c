@@ -4,8 +4,9 @@
 /**
  * RGSC55 - microKORG2 oscillator unit
  *
- * The drumlogue RG55 unit as a microKORG2 oscillator: a monophonic libEmuSC
- * SC-55 player on one part. It needs the SC-55 ROM set in the userfs:
+ * The drumlogue RG55 unit as a microKORG2 oscillator: a libEmuSC SC-55
+ * player on one part, with one engine per voice of the host. It needs the
+ * SC-55 ROM set in the userfs:
  *   /var/lib/microkorgd/userfs/Programs/sc55_{rom1,rom2,waverom1,waverom2,waverom3}.bin
  *
  * One parameter, because the keyboard supplies the note and its own level:
