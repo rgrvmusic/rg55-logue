@@ -11,6 +11,7 @@ cd "$SCRIPT_DIR"
 LOGUE_SDK_PATH="${LOGUE_SDK_PATH:-$HOME/Projects/logue/logue-sdk}"
 PLATFORM_PATH="$LOGUE_SDK_PATH/platform"
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-ghcr.io/gbraad-logue/logue-sdk/dev-env:latest}"
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
 UNIT=rg55_drumlogue
 
 if [ ! -d "$PLATFORM_PATH/drumlogue" ]; then
@@ -37,7 +38,7 @@ chmod 777 "$UNIT" 2>/dev/null || true
 
 # The platform is the SDK; the repo is read-only at /rg55 for common/, and
 # libEmuSC is read-only at /emusc. The unit directory is the only writable one.
-podman run --rm \
+"$CONTAINER_RUNTIME" run --rm \
     -v "$PLATFORM_PATH:/workspace:rw" \
     -v "$SCRIPT_DIR/$UNIT:/workspace/drumlogue/$UNIT:rw" \
     -v "$SCRIPT_DIR:/rg55:ro" \
