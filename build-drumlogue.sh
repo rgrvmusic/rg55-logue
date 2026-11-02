@@ -10,8 +10,14 @@ cd "$SCRIPT_DIR"
 
 LOGUE_SDK_PATH="${LOGUE_SDK_PATH:-$HOME/Projects/logue/logue-sdk}"
 PLATFORM_PATH="$LOGUE_SDK_PATH/platform"
+# The logue SDK's ontainer image
+#CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/xiashj/logue-sdk:latest}"
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-ghcr.io/gbraad-logue/logue-sdk/dev-env:latest}"
-CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
+if command -v docker >/dev/null 2>&1; then
+    CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
+else
+    CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
+fi
 UNIT=rg55_drumlogue
 
 if [ ! -d "$PLATFORM_PATH/drumlogue" ]; then
