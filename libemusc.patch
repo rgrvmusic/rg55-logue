@@ -3,8 +3,9 @@
 # This enables the single-part build used by RGSC55, adds the EMUSC_NO_REVERB
 # and EMUSC_NO_CHORUS switches the unit builds with, renders the SC-55 stream in
 # 64-sample sub-blocks so a host block never takes a whole control period's work,
-# and fixes incompatibilities with the drumlogue SDK's ARM C++ standard library/
-# compiler and loader.
+# and turns the 32 kHz to host resampler into a rational-phase filter for integer
+# host rates. It also fixes incompatibilities with the drumlogue SDK's ARM C++
+# standard library/compiler and loader.
 diff --git a/libemusc/src/note.cc b/libemusc/src/note.cc
 index 6afb2c2..7dc1a93 100644
 --- a/libemusc/src/note.cc
@@ -170,7 +171,7 @@ index 7806e95..9bab649 100644
  
    int get_last_peak_sample(void);
 diff --git a/libemusc/src/partial.cc b/libemusc/src/partial.cc
-index 3236b88..019ade0 100644
+index 3236b88..4f1964d 100644
 --- a/libemusc/src/partial.cc
 +++ b/libemusc/src/partial.cc
 @@ -59,7 +59,8 @@ Partial::Partial(int partialId, uint8_t key, uint8_t velocity,
@@ -194,6 +195,7 @@ index 3236b88..019ade0 100644
    if (_tva->finished())
      return 1;
  
+-  std::array<std::array<float, 256>, 2> partialBuf = {};
 +  // A partial can start between control updates; give it its first update now
 +  int slewOffset = offset;
 +  if (_needsUpdate) {
@@ -201,7 +203,7 @@ index 3236b88..019ade0 100644
 +    slewOffset = 0;
 +  }
 +
-   std::array<std::array<float, 256>, 2> partialBuf = {};
++  std::array<std::array<float, 256>, 2> partialBuf;
    _waveOscillator->get_sample_set(_pitch,
                                    _settings->get_pitchBend_factor(_partId),
 -                                  partialBuf[0]);
@@ -256,6 +258,199 @@ index 5fcf743..fb5d228 100644
  };
  
  }
+diff --git a/libemusc/src/resampler.cc b/libemusc/src/resampler.cc
+index cf8afb8..0c3a983 100644
+--- a/libemusc/src/resampler.cc
++++ b/libemusc/src/resampler.cc
+@@ -31,8 +31,10 @@ namespace EmuSC {
+ 
+ 
+ Resampler::Resampler()
+-  : _ratio(1.0),
+-    _readPos(static_cast<double>(HALF)),
++  : _stepNum(1),
++    _stepDen(1),
++    _intPos(HALF),
++    _phaseRem(0),
+     _writeCount(0)
+ {
+   _ringL.fill(0.0f);
+@@ -40,18 +42,19 @@ Resampler::Resampler()
+ 
+   // Default to a unity-ratio table; set_sample_rate() rebuilds as needed.
+   _buildTable(0.5f);
++  _buildPhases(32000);
+ }
+ 
+ 
+ void Resampler::set_sample_rate(int sampleRate)
+ {
+-  _ratio = 32000.0 / sampleRate;
+-
+   float cutoff = 0.5f * std::min(1.0f, static_cast<float>(sampleRate) / 32000.0f);
+   _buildTable(cutoff);
++  _buildPhases(sampleRate);
+ 
+   // Reset stream state
+-  _readPos    = static_cast<double>(HALF);
++  _intPos     = HALF;
++  _phaseRem   = 0;
+   _writeCount = 0;
+   _ringL.fill(0.0f);
+   _ringR.fill(0.0f);
+@@ -70,40 +73,97 @@ bool Resampler::get_next_sample(float &outL, float &outR)
+ {
+   // We need HALF input samples of lookahead beyond the read position before
+   // an output sample can be produced
+-  if (_readPos + HALF >= static_cast<double>(_writeCount))
++  if (_intPos + HALF >= _writeCount)
+     return false;
+ 
+-  int i = static_cast<int>(std::floor(_readPos));
+-  double frac = _readPos - i;
+-
+-  // Polyphase row selection with linear interpolation between rows
+-  double phasePos = frac * NPHASE;
+-  int pidx = static_cast<int>(phasePos);
+-  float pf = static_cast<float>(phasePos - pidx);
+-
+-  const float *row0 = &_table[pidx       * TAPS];
+-  const float *row1 = &_table[(pidx + 1) * TAPS];
++  int i = static_cast<int>(_intPos);
+ 
+   float accL = 0.0f;
+   float accR = 0.0f;
+ 
+-  for (int k = 0; k < TAPS; ++k) {
+-    int n = k - HALF + 1;
+-    int idx = (i + n) & RING_MASK;
+-    float c = row0[k] + pf * (row1[k] - row0[k]);
++  if (!_phaseCoeffs.empty()) {
++    const float *row = &_phaseCoeffs[_phaseRem * TAPS];
++
++    for (int k = 0; k < TAPS; ++k) {
++      int idx = (i + k - HALF + 1) & RING_MASK;
++      accL += _ringL[idx] * row[k];
++      accR += _ringR[idx] * row[k];
++    }
++  } else {
++    // Phase does not repeat within the table: interpolate between rows
++    double frac = static_cast<double>(_phaseRem) / _stepDen;
++    double phasePos = frac * NPHASE;
++    int pidx = static_cast<int>(phasePos);
++    float pf = static_cast<float>(phasePos - pidx);
++
++    const float *row0 = &_table[pidx       * TAPS];
++    const float *row1 = &_table[(pidx + 1) * TAPS];
+ 
+-    accL += _ringL[idx] * c;
+-    accR += _ringR[idx] * c;
++    for (int k = 0; k < TAPS; ++k) {
++      int idx = (i + k - HALF + 1) & RING_MASK;
++      float c = row0[k] + pf * (row1[k] - row0[k]);
++
++      accL += _ringL[idx] * c;
++      accR += _ringR[idx] * c;
++    }
+   }
+ 
+   outL = accL;
+   outR = accR;
+ 
+-  _readPos += _ratio;
++  _phaseRem += _stepNum;
++  if (_phaseRem >= _stepDen) {
++    _intPos += _phaseRem / _stepDen;
++    _phaseRem %= _stepDen;
++  }
++
+   return true;
+ }
+ 
+ 
++// Build one coefficient row per phase of the rational input/output ratio. At
++// 48 kHz the ratio is 2/3, so only three rows are needed and the per-output
++// row interpolation disappears from the inner loop.
++void Resampler::_buildPhases(int sampleRate)
++{
++  int g = _gcd(32000, sampleRate);
++  _stepNum = 32000 / g;
++  _stepDen = sampleRate / g;
++
++  _phaseCoeffs.clear();
++  if (_stepDen > MAX_PHASES)
++    return;
++
++  _phaseCoeffs.resize(_stepDen * TAPS);
++
++  for (int p = 0; p < _stepDen; ++p) {
++    double frac = static_cast<double>(p) / _stepDen;
++    double phasePos = frac * NPHASE;
++    int pidx = static_cast<int>(phasePos);
++    float pf = static_cast<float>(phasePos - pidx);
++
++    const float *row0 = &_table[pidx       * TAPS];
++    const float *row1 = &_table[(pidx + 1) * TAPS];
++    float *row = &_phaseCoeffs[p * TAPS];
++
++    for (int k = 0; k < TAPS; ++k)
++      row[k] = row0[k] + pf * (row1[k] - row0[k]);
++  }
++}
++
++
++int Resampler::_gcd(int a, int b)
++{
++  while (b) {
++    int t = a % b;
++    a = b;
++    b = t;
++  }
++
++  return a;
++}
++
++
+ void Resampler::_buildTable(float cutoff)
+ {
+   _table.resize((NPHASE + 1) * TAPS);
+diff --git a/libemusc/src/resampler.h b/libemusc/src/resampler.h
+index 59c8a4a..e83f528 100644
+--- a/libemusc/src/resampler.h
++++ b/libemusc/src/resampler.h
+@@ -51,10 +51,16 @@ private:
+   static constexpr int TAPS = 2 * HALF;
+   static constexpr int RING = 64;        // Input ring buffer (> 2*HALF, pow2)
+   static constexpr int RING_MASK = RING - 1;
++  static constexpr int MAX_PHASES = 1024;
+ 
+-  double _ratio;        // Input samples advanced per output sample (32000/host)
+-  double _readPos;      // Continuous read position (abs. input sample index)
+-  long   _writeCount;   // Total input frames pushed
++  // Read position as an exact rational: _intPos + _phaseRem / _stepDen input
++  // samples. With integer rates the phase repeats every _stepDen outputs, so
++  // the coefficient rows are built once instead of interpolated per output.
++  int  _stepNum;        // Input samples advanced per output (32000/host)
++  int  _stepDen;
++  long _intPos;
++  int  _phaseRem;
++  long _writeCount;     // Total input frames pushed
+ 
+   std::array<float, RING> _ringL;
+   std::array<float, RING> _ringR;
+@@ -62,7 +68,12 @@ private:
+   // Polyphase coefficient table: (NPHASE + 1) rows of TAPS coefficients
+   std::vector<float> _table;
+ 
++  // One coefficient row per repeating phase; empty when _stepDen is too large
++  std::vector<float> _phaseCoeffs;
++
+   void  _buildTable(float cutoff);
++  void  _buildPhases(int sampleRate);
++  static int _gcd(int a, int b);
+   static double _i0(double x);     // Modified Bessel I0 for Kaiser window
+ };
+ 
 diff --git a/libemusc/src/reverb.cc b/libemusc/src/reverb.cc
 index 6c3ba2c..8881c55 100644
 --- a/libemusc/src/reverb.cc
