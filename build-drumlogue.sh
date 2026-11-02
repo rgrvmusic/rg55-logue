@@ -1,5 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Gerard Braad (Regroove | RGRV)
 # Build the RG55 drumlogue unit in the logue SDK container.
 
 set -e

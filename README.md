@@ -37,7 +37,7 @@ git submodule update --init libemusc
 ./build-microkorg2.sh
 ```
 
-`bin/RG55.drmlgunit` and `bin/RG55.mk2unit` are the units.
+This will result in the two units: `bin/RG55.drmlgunit` and `bin/RG55.mk2unit` .
 
 
 # How to use
