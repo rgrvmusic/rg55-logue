@@ -6,7 +6,7 @@ A monophonic Sound Canvas SC-55 player based on libEmuSC for the KORG drumlogue 
 microKORG2.
 
 
-# Constraints and notes
+## Constraints and notes
 
 
 Chorus and reverb have been turned off (disabled at compile time), otherwise
@@ -40,7 +40,7 @@ git submodule update --init libemusc
 This will result in the two units: `bin/RG55.drmlgunit` and `bin/RG55.mk2unit` .
 
 
-# How to use
+## How to use
 
 
 Place `RG55.drmlgunit` in `/Units/Synths` of the userfs mount. Place
@@ -62,7 +62,7 @@ Before loading the unit, copy the complete user-provided SC-55L set to
 > by this project.
 
 
-# Disclaimer
+## Disclaimer
 
 This project is pulled out of my experiments for RFX (Regreoove Effects), hence
 you will see this namespace used. It has been refactored in to a separate project
