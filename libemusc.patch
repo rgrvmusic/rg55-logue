@@ -1,13 +1,115 @@
 # Applies to libEmuSC commit f503c9be3368370920055472599af9f2df78f623.
 #
 # This enables the single-part build used by RGSC55, adds the EMUSC_NO_REVERB
-# and EMUSC_NO_CHORUS switches the unit builds with, and fixes incompatibilities
-# with the drumlogue SDK's ARM C++ standard library/compiler and loader.
+# and EMUSC_NO_CHORUS switches the unit builds with, renders the SC-55 stream in
+# 64-sample sub-blocks so a host block never takes a whole control period's work,
+# and fixes incompatibilities with the drumlogue SDK's ARM C++ standard library/
+# compiler and loader.
+diff --git a/libemusc/src/note.cc b/libemusc/src/note.cc
+index 6afb2c2..7dc1a93 100644
+--- a/libemusc/src/note.cc
++++ b/libemusc/src/note.cc
+@@ -134,7 +134,8 @@ void Note::update(void)
+ }
+ 
+ 
+-bool Note::get_sample_set(std::array<std::array<float, 256>, 2> &dryBus)
++bool Note::get_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
++			  int n, int offset)
+ {
+   bool finished[2] = {0, 0};
+ 
+@@ -143,7 +144,7 @@ bool Note::get_sample_set(std::array<std::array<float, 256>, 2> &dryBus)
+     if  (_partial[p] == NULL)
+       finished[p] = 1;
+     else
+-      finished[p] = _partial[p]->get_sample_set(dryBus);
++      finished[p] = _partial[p]->get_sample_set(dryBus, n, offset);
+   }
+ 
+   if (finished[0] == true && finished[1] == true)
+diff --git a/libemusc/src/note.h b/libemusc/src/note.h
+index a4b73ca..53787c9 100644
+--- a/libemusc/src/note.h
++++ b/libemusc/src/note.h
+@@ -47,7 +47,8 @@ public:
+ 
+   void update(void);
+ 
+-  bool get_sample_set(std::array<std::array<float, 256>, 2> &dryBus);
++  bool get_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
++		      int n, int offset);
+ 
+   int get_num_partials(void);
+ 
 diff --git a/libemusc/src/part.cc b/libemusc/src/part.cc
-index 1456f76..2feda07 100644
+index 1456f76..00119d2 100644
 --- a/libemusc/src/part.cc
 +++ b/libemusc/src/part.cc
-@@ -370,9 +370,9 @@ int Part::control_change(uint8_t msgId, uint8_t value)
+@@ -48,10 +48,12 @@ Part::~Part()
+ }
+ 
+ 
+-// All Sound Canvas modules generates 256 samples per control update.
++// All Sound Canvas modules generates 256 samples per control update, rendered
++// here n samples at a time starting at offset.
+ int Part::get_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
+ 			 std::array<std::array<float, 256>, 2> &chorusBus,
+-			 std::array<std::array<float, 256>, 2> &reverbBus)
++			 std::array<std::array<float, 256>, 2> &reverbBus,
++			 int n, int offset)
+ {
+   _notesMutex->lock();
+ 
+@@ -69,7 +71,7 @@ int Part::get_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
+     // Get next sample from active notes, delete those which are finished
+     std::list<Note*>::iterator itr = _notes.begin();
+     while (itr != _notes.end()) {
+-      bool finished = (*itr)->get_sample_set(dryBus);
++      bool finished = (*itr)->get_sample_set(dryBus, n, offset);
+ 
+       if (finished) {
+  //      std::cout << "Both partials have finished -> delete note" << std::endl;
+@@ -81,22 +83,28 @@ int Part::get_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
+     }
+ 
+     // Store last (highest) value for future queries (typically for bar display)
+-    auto itL = std::max_element(dryBus[0].begin(), dryBus[0].end());
++    auto itL = std::max_element(dryBus[0].begin() + offset,
++				dryBus[0].begin() + offset + n);
+     _lastPeakSample = *itL;
+-    auto itR = std::max_element(dryBus[0].begin(), dryBus[0].end());
++    auto itR = std::max_element(dryBus[1].begin() + offset,
++				dryBus[1].begin() + offset + n);
+     _lastPeakSample = std::max(_lastPeakSample, *itR);
+ 
++#ifndef EMUSC_NO_CHORUS
+     float chorusSL = _settings->get_param(PatchParam::ChorusSendLevel, _id) / 128.0f;
+-    chorusBus = dryBus;
+-    auto& elementC = reinterpret_cast<float(&)[2 * 256]>(chorusBus);
+-    for (size_t i = 0; i < 2 * 256; ++i)
+-      elementC[i] *= chorusSL;
++    for (int i = 0; i < n; i++) {
++      chorusBus[0][offset + i] = dryBus[0][offset + i] * chorusSL;
++      chorusBus[1][offset + i] = dryBus[1][offset + i] * chorusSL;
++    }
++#endif
+ 
++#ifndef EMUSC_NO_REVERB
+     float reverbSL = _settings->get_param(PatchParam::ReverbSendLevel, _id) / 128.0f;
+-    reverbBus = dryBus;
+-    auto& elementR = reinterpret_cast<float(&)[2 * 256]>(reverbBus);
+-    for (size_t i = 0; i < 2 * 256; ++i)
+-      elementR[i] *= reverbSL;
++    for (int i = 0; i < n; i++) {
++      reverbBus[0][offset + i] = dryBus[0][offset + i] * reverbSL;
++      reverbBus[1][offset + i] = dryBus[1][offset + i] * reverbSL;
++    }
++#endif
+   }
+ 
+   // Export envelopes and LFOs to external client
+@@ -370,9 +378,9 @@ int Part::control_change(uint8_t msgId, uint8_t value)
    } else if (msgId == 64) {                            // Hold1
      if (_settings->get_param(PatchParam::RxHold1, _id)) {
        if (value < 64) {
@@ -19,7 +121,7 @@ index 1456f76..2feda07 100644
        }
  
        for (auto &n : _notes)
-@@ -383,17 +383,17 @@ int Part::control_change(uint8_t msgId, uint8_t value)
+@@ -383,17 +391,17 @@ int Part::control_change(uint8_t msgId, uint8_t value)
    } else if (msgId == 65) {                            // Portamento
      if (_settings->get_param(PatchParam::RxPortamento, _id)) {
        if (value < 64)
@@ -41,7 +143,7 @@ index 1456f76..2feda07 100644
  
        for (auto &n : _notes)
  	n->sustain(_settings->get_param(PatchParam::Sostenuto, _id));
-@@ -402,9 +402,9 @@ int Part::control_change(uint8_t msgId, uint8_t value)
+@@ -402,9 +410,9 @@ int Part::control_change(uint8_t msgId, uint8_t value)
    } else if (msgId == 67) {                            // Soft
      if (_settings->get_param(PatchParam::RxSoft, _id)) {
        if (value < 64)
@@ -53,6 +155,107 @@ index 1456f76..2feda07 100644
      }
  
    } else if (msgId == 84) {                            // Portamento control
+diff --git a/libemusc/src/part.h b/libemusc/src/part.h
+index 7806e95..9bab649 100644
+--- a/libemusc/src/part.h
++++ b/libemusc/src/part.h
+@@ -45,7 +45,8 @@ public:
+ 
+   int get_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
+ 		     std::array<std::array<float, 256>, 2> &chrousBus,
+-		     std::array<std::array<float, 256>, 2> &reverbBus);
++		     std::array<std::array<float, 256>, 2> &reverbBus,
++		     int n, int offset);
+   void update(void);
+ 
+   int get_last_peak_sample(void);
+diff --git a/libemusc/src/partial.cc b/libemusc/src/partial.cc
+index 3236b88..019ade0 100644
+--- a/libemusc/src/partial.cc
++++ b/libemusc/src/partial.cc
+@@ -59,7 +59,8 @@ Partial::Partial(int partialId, uint8_t key, uint8_t velocity,
+     _pitch(NULL),
+     _tvf(NULL),
+     _tva(NULL),
+-    _pitchAdj(0)
++    _pitchAdj(0),
++    _needsUpdate(true)
+ {
+   _drumSet = settings->get_param(PatchParam::UseForRhythm, partId);
+   if (_drumSet)
+@@ -107,22 +108,30 @@ Partial::~Partial()
+ }
+ 
+ 
+-bool Partial::get_sample_set(std::array<std::array<float, 256>, 2> &dryBus)
++bool Partial::get_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
++			     int n, int offset)
+ {
+   if (_tva->finished())
+     return 1;
+ 
++  // A partial can start between control updates; give it its first update now
++  int slewOffset = offset;
++  if (_needsUpdate) {
++    update();
++    slewOffset = 0;
++  }
++
+   std::array<std::array<float, 256>, 2> partialBuf = {};
+   _waveOscillator->get_sample_set(_pitch,
+                                   _settings->get_pitchBend_factor(_partId),
+-                                  partialBuf[0]);
++                                  partialBuf[0], n);
+ 
+-  _tvf->apply_sample_set(partialBuf[0]);
+-  _tva->apply_sample_set(partialBuf);
++  _tvf->apply_sample_set(partialBuf[0], n);
++  _tva->apply_sample_set(partialBuf, n, slewOffset);
+ 
+-  for (int i = 0; i < 256; i++) {
+-    dryBus[0][i] += partialBuf[0][i];
+-    dryBus[1][i] += partialBuf[1][i];
++  for (int i = 0; i < n; i++) {
++    dryBus[0][offset + i] += partialBuf[0][i];
++    dryBus[1][offset + i] += partialBuf[1][i];
+   }
+ 
+   return 0;
+@@ -148,6 +157,8 @@ void Partial::update(void)
+   if (_tva) _tva->update();
+ 
+   if (_LFO2) _LFO2->update();
++
++  _needsUpdate = false;
+ }
+ 
+ 
+diff --git a/libemusc/src/partial.h b/libemusc/src/partial.h
+index 5fcf743..fb5d228 100644
+--- a/libemusc/src/partial.h
++++ b/libemusc/src/partial.h
+@@ -46,7 +46,8 @@ public:
+ 	  WaveGenerator *LFO1, Settings *settings, int8_t partId);
+   ~Partial();
+ 
+-  bool get_sample_set(std::array<std::array<float, 256>, 2> &dryBus);
++  bool get_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
++		      int n, int offset);
+ 
+   void stop(void);
+   void update(void);
+@@ -83,6 +84,11 @@ private:
+   TVA *_tva;
+ 
+   float _pitchAdj;
++
++  // A note can start between control updates. Its first render then has to run
++  // its own update, and starts at the beginning of the control block's slew
++  // ramp rather than part way into it.
++  bool _needsUpdate;
+ };
+ 
+ }
 diff --git a/libemusc/src/reverb.cc b/libemusc/src/reverb.cc
 index 6c3ba2c..8881c55 100644
 --- a/libemusc/src/reverb.cc
@@ -230,10 +433,10 @@ index c2d0858..5a1013e 100644
  };
  
 diff --git a/libemusc/src/synth.cc b/libemusc/src/synth.cc
-index 1445030..9959b84 100644
+index 1445030..45ca215 100644
 --- a/libemusc/src/synth.cc
 +++ b/libemusc/src/synth.cc
-@@ -39,6 +39,10 @@
+@@ -39,13 +39,21 @@
  
  namespace EmuSC {
  
@@ -241,10 +444,22 @@ index 1445030..9959b84 100644
 +#define EMUSC_MAX_PARTS 16
 +#endif
 +
++// SC-55 samples are rendered in sub-blocks of this size. Control updates still
++// fire every 256 samples, but a small sub-block keeps each host block's work
++// short: the whole 256-sample burst no longer lands in a single render call.
++#define EMUSC_SUB_BLOCK 64
++
  Synth::Synth(ControlRom &controlRom, WaveRom &waveRom, SoundMap map)
    : _sampleRate(0),
      _channels(0),
-@@ -82,7 +86,7 @@ Synth::~Synth()
+     _numClippedSamples(0),
+     _ctrlRom(controlRom),
+     _waveRom(waveRom),
+-    _phase(0.0),
+     _updateCounter(0),
+     _hostSampleBufRIndex(0),
+     _hostSampleBufWIndex(0)
+@@ -82,7 +90,7 @@ Synth::~Synth()
  
  void Synth::_init_parts(void)
  {
@@ -253,8 +468,129 @@ index 1445030..9959b84 100644
      _parts.emplace_back(i, _settings, _ctrlRom, _waveRom);
  }
  
+@@ -304,7 +312,7 @@ int Synth::get_next_frame(float &lOut, float &rOut)
+     return 0;
+   }
+ 
+-  // We are out of samples, trigger new control update + 256 samples @ 32 kHz
++  // We are out of samples, render the next sub-block of SC-55 samples
+   if (_hostSampleBufWIndex == _hostSampleBufRIndex) {
+     _process_samples();
+     _hostSampleBufRIndex = 0;
+@@ -336,21 +344,32 @@ uint32_t Synth::get_num_clipped_samples(bool reset)
+ }
+ 
+ 
+-// Do a control update and read 256 samples
++// Render one sub-block of the 256-sample control block. Control updates fire
++// on the first sub-block only, so the control cadence is unchanged while each
++// render call does a quarter of the sample work.
+ void Synth::_process_samples(void)
+ {
+-  // Start all samples processings with a control updates
+-  for (auto &p : _parts)
+-    p.update();
++  const int offset = _updateCounter;
++  const int n = std::min<int>(EMUSC_SUB_BLOCK, 256 - offset);
+ 
+-  _systemEffects->update();
++  if (offset == 0) {
++    for (auto &p : _parts)
++      p.update();
++
++    _systemEffects->update();
++  }
+ 
+-  // Clear all relative buffers before accumulating new samples
++  // Clear this sub-block's slice of the buses before accumulating new samples
++  std::fill(_dryBus[0].begin() + offset, _dryBus[0].begin() + offset + n, 0.0f);
++  std::fill(_dryBus[1].begin() + offset, _dryBus[1].begin() + offset + n, 0.0f);
++#if !defined(EMUSC_NO_CHORUS) || !defined(EMUSC_NO_REVERB)
+   for (int i = 0; i < 2; i++) {
+-    _dryBus[i].fill(0.0f);
+-    _chorusBus[i].fill(0.0f);
+-    _reverbBus[i].fill(0.0f);
++    std::fill(_chorusBus[i].begin() + offset,
++              _chorusBus[i].begin() + offset + n, 0.0f);
++    std::fill(_reverbBus[i].begin() + offset,
++              _reverbBus[i].begin() + offset + n, 0.0f);
+   }
++#endif
+   std::fill(_hostSampleBufL.begin(), _hostSampleBufL.end(), 0.0f);
+   std::fill(_hostSampleBufR.begin(), _hostSampleBufR.end(), 0.0f);
+ 
+@@ -360,17 +379,24 @@ void Synth::_process_samples(void)
+ 
+   // Iterate all parts and ask for next sample
+   for (auto &p : _parts) {
+-    p.get_sample_set(_dryBus, _chorusBus, _reverbBus);
++    p.get_sample_set(_dryBus, _chorusBus, _reverbBus, n, offset);
+   }
+ 
+   // Add system effects
+-  _systemEffects->apply(_chorusBus, _reverbBus, _chorusOut, _reverbOut);
++#if !defined(EMUSC_NO_CHORUS) || !defined(EMUSC_NO_REVERB)
++  _systemEffects->apply(_chorusBus, _reverbBus, _chorusOut, _reverbOut,
++			 n, offset);
++#endif
+ 
+   // Work through the dryBus and genereate samples adapted to host's sample rate
+-  for (int i = 0; i < 256; i++) {
+-
+-    float l = _dryBus[0][i] + _chorusOut[0][i] + _reverbOut[0][i];
+-    float r = _dryBus[1][i] + _chorusOut[1][i] + _reverbOut[1][i];
++  for (int i = offset; i < offset + n; i++) {
++
++    float l = _dryBus[0][i];
++    float r = _dryBus[1][i];
++#if !defined(EMUSC_NO_CHORUS) || !defined(EMUSC_NO_REVERB)
++    l += _chorusOut[0][i] + _reverbOut[0][i];
++    r += _chorusOut[1][i] + _reverbOut[1][i];
++#endif
+     _resampler->push(l, r);
+ 
+     float hostL = 0, hostR = 0;
+@@ -384,6 +410,8 @@ void Synth::_process_samples(void)
+   }
+ 
+   midiMutex.unlock();
++
++  _updateCounter = (offset + n >= 256) ? 0 : offset + n;
+ }
+ 
+ 
+@@ -410,8 +438,12 @@ void Synth::set_audio_format(uint32_t sampleRate, uint8_t channels)
+ 
+   _init_parts();
+ 
+-  _hostSampleBufL.resize(std::ceil(256 * sampleRate / 32000.0) + 1);
+-  _hostSampleBufR.resize(std::ceil(256 * sampleRate / 32000.0) + 1);
++  _hostSampleBufL.resize(std::ceil(EMUSC_SUB_BLOCK * sampleRate / 32000.0) + 2);
++  _hostSampleBufR.resize(std::ceil(EMUSC_SUB_BLOCK * sampleRate / 32000.0) + 2);
++
++  _hostSampleBufRIndex = 0;
++  _hostSampleBufWIndex = 0;
++  _updateCounter = 0;
+ }
+ 
+ 
+diff --git a/libemusc/src/synth.h b/libemusc/src/synth.h
+index c22620e..c250eae 100644
+--- a/libemusc/src/synth.h
++++ b/libemusc/src/synth.h
+@@ -154,9 +154,7 @@ private:
+   ControlRom &_ctrlRom;
+   WaveRom &_waveRom;
+ 
+-  float _phase;               // Fractional SC-55 sample position
+-  float _phaseIncrement;      // SC-55 samples per host sample
+-  int   _updateCounter;       // Counts SC-55 samples, fires at 256
++  int   _updateCounter;       // SC-55 samples rendered since the last update
+ 
+   std::vector<float> _hostSampleBufL;
+   std::vector<float> _hostSampleBufR;
 diff --git a/libemusc/src/system_effects.cc b/libemusc/src/system_effects.cc
-index fa3e9ee..18fcdec 100644
+index fa3e9ee..68c68ee 100644
 --- a/libemusc/src/system_effects.cc
 +++ b/libemusc/src/system_effects.cc
 @@ -38,8 +38,12 @@ SystemEffects::SystemEffects(Settings *settings)
@@ -270,9 +606,18 @@ index fa3e9ee..18fcdec 100644
  
    update();
  }
-@@ -62,15 +66,27 @@ int SystemEffects::apply(std::array<std::array<float, 256>, 2> &chorusBus,
+@@ -56,21 +60,34 @@ SystemEffects::~SystemEffects()
+ int SystemEffects::apply(std::array<std::array<float, 256>, 2> &chorusBus,
+ 			 std::array<std::array<float, 256>, 2> &reverbBus,
+ 			 std::array<std::array<float, 256>, 2> &chorusOut,
+-			 std::array<std::array<float, 256>, 2> &reverbOut)
++			 std::array<std::array<float, 256>, 2> &reverbOut,
++			 int n, int offset)
+ {
+   float cReverbSend;
  
-   for (int i = 0; i < 256; i ++) {
+-  for (int i = 0; i < 256; i ++) {
++  for (int i = offset; i < offset + n; i ++) {
      float cSample[2] = { 0, 0 };
 +#ifndef EMUSC_NO_CHORUS
      float cInput = 0.5f * (chorusBus[0][i] + chorusBus[1][i]);
@@ -298,7 +643,7 @@ index fa3e9ee..18fcdec 100644
  
      reverbOut[0][i] = rSample[0];
      reverbOut[1][i] = rSample[1];
-@@ -82,8 +98,12 @@ int SystemEffects::apply(std::array<std::array<float, 256>, 2> &chorusBus,
+@@ -82,8 +99,12 @@ int SystemEffects::apply(std::array<std::array<float, 256>, 2> &chorusBus,
  
  void SystemEffects::update(void)
  {
@@ -311,8 +656,161 @@ index fa3e9ee..18fcdec 100644
  }
  
  } //  namespace EmuSC
+diff --git a/libemusc/src/system_effects.h b/libemusc/src/system_effects.h
+index 056e7af..54ee655 100644
+--- a/libemusc/src/system_effects.h
++++ b/libemusc/src/system_effects.h
+@@ -40,7 +40,8 @@ public:
+   int apply(std::array<std::array<float, 256>, 2> &chorusBus,
+ 	    std::array<std::array<float, 256>, 2> &reverbBus,
+ 	    std::array<std::array<float, 256>, 2> &chorusOut,
+-	    std::array<std::array<float, 256>, 2> &reverbOut);
++	    std::array<std::array<float, 256>, 2> &reverbOut,
++	    int n, int offset);
+   void update(void);
+ 
+ private:
+diff --git a/libemusc/src/tva.cc b/libemusc/src/tva.cc
+index 342a539..4b692d5 100644
+--- a/libemusc/src/tva.cc
++++ b/libemusc/src/tva.cc
+@@ -49,7 +49,7 @@ TVA::TVA(ControlRom &ctrlRom, uint8_t key, uint8_t velocity, int sampleIndex,
+     _settings(settings),
+     _partId(partId),
+     _dynLevelEC(0), _envLevelEC(0),
+-    _slewDynGain{}, _slewEnvGain{}
++    _slewDynGain{}, _slewEnvGain{}, _smoothLevel(0)
+ {
+   int cVelocity = _get_velocity_from_vcurve(velocity);
+   _init_envelope(ctrlRom, sampleIndex, instrumentIndex, cVelocity);
+@@ -70,16 +70,19 @@ TVA::TVA(ControlRom &ctrlRom, uint8_t key, uint8_t velocity, int sampleIndex,
+ // TVA consists of two values: dynamic volume corrections and envelope level.
+ // Each of these levels have their own "mode" variable controlling how they are
+ // interpolated / smoothed across and inside control loops of 256 samples.
+-void TVA::apply_sample_set(std::array<std::array<float, 256>, 2> &dryBus)
++void TVA::apply_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
++			   int n, int offset)
+ {
+   auto norm = [](float v) { return v / 32768.0f; };
+-  _smooth(_envLevelMode, norm(_prevEnvLevel), norm(_envLevel), _slewEnvGain);
++  _smooth(_envLevelMode, norm(_prevEnvLevel), norm(_envLevel), _slewEnvGain,
++	  n, offset);
+ 
+   float panL = _panpotL / 127.0f;
+   float panR = _panpotR / 127.0f;
+ 
+-  for (int i = 0; i < 256; i++) {
+-    float sample = dryBus[0][i] * _slewDynGain[i] * _slewEnvGain[i];
++  for (int i = 0; i < n; i++) {
++    float sample = dryBus[0][i] * _slewDynGain[offset + i] *
++                   _slewEnvGain[offset + i];
+     dryBus[0][i] = sample * panR;
+     dryBus[1][i] = sample * panL;
+   }
+@@ -661,25 +664,29 @@ void TVA::_slew_function_envelope(uint16_t mode)
+ // intended target value to avoid drift. We use float and clamp to target
+ // (for now).
+ void TVA::_smooth(int mode, float start, float target,
+-                  std::array<float, 256> &gain)
++                  std::array<float, 256> &gain, int n, int offset)
+ {
+   // 0xff00 => use target as fixed value for all samples
+   if (mode == 0xff00) {
+-    for (int i = 0; i < 256; i++)
++    for (int i = offset; i < offset + n; i++)
+       gain[i] = target;
+     return;
+   }
+ 
+   // All other mode values are ignored => linear ramp
+   float step = (target - start) / 256.0f;
+-  float level = start;
+-  for (int i = 0; i < 256; i++) {
++  if (offset == 0)
++    _smoothLevel = start;
++  float level = _smoothLevel;
++  for (int i = offset; i < offset + n; i++) {
+     level += step;
+     gain[i] = level;
+   }
++  _smoothLevel = level;
+ 
+   // Clamp to target at last value to avoid any drift
+-  gain[255] = target;
++  if (offset + n >= 256)
++    gain[255] = target;
+ }
+ 
+ 
+diff --git a/libemusc/src/tva.h b/libemusc/src/tva.h
+index 207a1e9..87674d2 100644
+--- a/libemusc/src/tva.h
++++ b/libemusc/src/tva.h
+@@ -43,7 +43,8 @@ public:
+ 
+   void update(bool reset = false);
+   void apply(double *sample);
+-  void apply_sample_set(std::array<std::array<float, 256>, 2> &dryBus);
++  void apply_sample_set(std::array<std::array<float, 256>, 2> &dryBus,
++			int n, int offset);
+ 
+   void note_off();
+ 
+@@ -83,6 +84,7 @@ private:
+   SlewCalc _tvDyn, _tvEnv;
+   uint16_t _dynLevelEC, _envLevelEC;         // External chip's mirror of levels
+   std::array<float, 256> _slewDynGain, _slewEnvGain;
++  float _smoothLevel;                        // Envelope ramp position
+ 
+   TVA();
+ 
+@@ -100,8 +102,8 @@ private:
+   void _init_new_phase(enum Phase newPhase);
+   void _iterate_phase(void);
+ 
+-  static void _smooth(int mode, float start, float target,
+-                      std::array<float, 256> &gain);
++  void _smooth(int mode, float start, float target,
++               std::array<float, 256> &gain, int n, int offset);
+   void _slew_function_dynvol(uint16_t mode);
+   void _slew_function_envelope(uint16_t mode);
+   };
+diff --git a/libemusc/src/tvf.cc b/libemusc/src/tvf.cc
+index be00b62..233492c 100644
+--- a/libemusc/src/tvf.cc
++++ b/libemusc/src/tvf.cc
+@@ -104,13 +104,13 @@ TVF::~TVF()
+ // "mode" variable controlling how the frequency values are interpolated /
+ // smoothed across and inside control loops of 256 samples. Resonance is a more
+ // static variable controlled by instrument definition and SySEx messsages.
+-void TVF::apply_sample_set(std::array<float, 256> &dryBus)
++void TVF::apply_sample_set(std::array<float, 256> &dryBus, int n)
+ {
+-  // Skip filter calculation if filter is disabled for this partial 
++  // Skip filter calculation if filter is disabled for this partial
+   if (_svf == nullptr)
+     return;
+ 
+-  for (int i = 0; i < 256; i++) {
++  for (int i = 0; i < n; i++) {
+     dryBus[i] = _svf->process_sample(dryBus[i]);
+   }
+ }
+diff --git a/libemusc/src/tvf.h b/libemusc/src/tvf.h
+index 2efa447..7a5d273 100644
+--- a/libemusc/src/tvf.h
++++ b/libemusc/src/tvf.h
+@@ -43,7 +43,7 @@ public:
+   ~TVF();
+ 
+   void apply(float *sample);
+-  void apply_sample_set(std::array<float, 256> &dryBus);
++  void apply_sample_set(std::array<float, 256> &dryBus, int n);
+   void update(void);
+ 
+   void note_off();
 diff --git a/libemusc/src/wave_oscillator.cc b/libemusc/src/wave_oscillator.cc
-index 8ca4564..c103828 100644
+index 8ca4564..7da5837 100644
 --- a/libemusc/src/wave_oscillator.cc
 +++ b/libemusc/src/wave_oscillator.cc
 @@ -26,12 +26,71 @@
@@ -388,10 +886,40 @@ index 8ca4564..c103828 100644
      _firstRunCompleteCallback(cb),
      _firstRunComplete(false)
  {
+@@ -55,9 +114,9 @@ WaveOscillator::WaveOscillator(ControlRom::Sample *ctrlSample,
+ 
+ 
+ void WaveOscillator::get_sample_set(Pitch *pitch, float pitchBend,
+-                                    std::array<float, 256> &dryBus)
++                                    std::array<float, 256> &dryBus, int n)
+ {
+-  for (int i = 0; i < 256; i++) {
++  for (int i = 0; i < n; i++) {
+     float output = _interpolate();
+     dryBus[i] = output;
+ 
+@@ -81,7 +140,7 @@ void WaveOscillator::get_sample_set(Pitch *pitch, float pitchBend,
+ float WaveOscillator::_fetch_sample(int index)
+ {
+   index = std::clamp(index, 0, (int) _pcmSamples->size() - 1);
+-  return _pcmSamples->at(index);
++  return (*_pcmSamples)[index];
+ }
+ 
+ 
 diff --git a/libemusc/src/wave_oscillator.h b/libemusc/src/wave_oscillator.h
-index 16a508f..c5b650c 100644
+index 16a508f..d48f861 100644
 --- a/libemusc/src/wave_oscillator.h
 +++ b/libemusc/src/wave_oscillator.h
+@@ -53,7 +53,7 @@ public:
+                  std::function<void(void)> cb);
+ 
+   void get_sample_set(Pitch *pitch, float pitchBend,
+-                      std::array<float, 256> &dryBus);
++                      std::array<float, 256> &dryBus, int n);
+ 
+ private:
+   int _sampleStart;           // 0 or portamento offset if portamento is active
 @@ -81,61 +81,7 @@ private:
    float _interpolate();
  
