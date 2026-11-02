@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Gerard Braad (Regroove | RGRV)
+
+name: Build units
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+  pull_request: {}
+
+
+jobs:
+  drumlogue:
+    name: Build (drumlogue)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install container tools
+        uses: gbraad-actions/setup-container-tools@v1
+
+      - name: Check out the logue SDK
+        run: |
+          mkdir -p "$HOME/Projects/logue"
+          git clone --depth 1 https://github.com/korginc/logue-sdk.git \
+              "$HOME/Projects/logue/logue-sdk"
+
+      # /workspace is the platform directory, and inside the image it is the
+      # build user's HOME: a fresh clone is mode 755 and the container user is
+      # not its owner, so the environment script cannot write its backup there.
+      - name: Make the platform directory writable by the container
+        run: chmod 777 "$HOME/Projects/logue/logue-sdk/platform"
+
+      # build-drumlogue.sh checks out libEmuSC and applies libemusc.patch.
+      - name: Build the drumlogue unit
+        run: ./build-drumlogue.sh
+
+      - name: Upload the unit
+        uses: actions/upload-artifact@v4
+        with:
+          name: rg55-drumlogue
+          path: bin/
+          retention-days: 7
+
+  microkorg2:
+    name: Build (microKORG2)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install container tools
+        uses: gbraad-actions/setup-container-tools@v1
+
+      - name: Check out the logue SDK
+        run: |
+          mkdir -p "$HOME/Projects/logue"
+          git clone --depth 1 https://github.com/korginc/logue-sdk.git \
+              "$HOME/Projects/logue/logue-sdk"
+
+      # see the drumlogue job above: the same directory is the build user's HOME
+      - name: Make the platform directory writable by the container
+        run: chmod 777 "$HOME/Projects/logue/logue-sdk/platform"
+
+      # build-microkorg2.sh checks out libEmuSC and applies libemusc.patch.
+      - name: Build the microKORG2 unit
+        run: ./build-microkorg2.sh
+
+      - name: Upload the unit
+        uses: actions/upload-artifact@v4
+        with:
+          name: rg55-microkorg2
+          path: bin/
+          retention-days: 7
