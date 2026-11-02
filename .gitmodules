@@ -1,0 +1,3 @@
+[submodule "libemusc"]
+	path = libemusc
+	url = https://github.com/skjelten/emusc.git
