@@ -1,0 +1,457 @@
+# Applies to libEmuSC commit f503c9be3368370920055472599af9f2df78f623.
+#
+# This enables the single-part build used by RGSC55, adds the EMUSC_NO_REVERB
+# and EMUSC_NO_CHORUS switches the unit builds with, and fixes incompatibilities
+# with the drumlogue SDK's ARM C++ standard library/compiler and loader.
+diff --git a/libemusc/src/part.cc b/libemusc/src/part.cc
+index 1456f76..2feda07 100644
+--- a/libemusc/src/part.cc
++++ b/libemusc/src/part.cc
+@@ -370,9 +370,9 @@ int Part::control_change(uint8_t msgId, uint8_t value)
+   } else if (msgId == 64) {                            // Hold1
+     if (_settings->get_param(PatchParam::RxHold1, _id)) {
+       if (value < 64) {
+-	_settings->set_param(PatchParam::Hold1, (uint8_t) 0, _id);
++	_settings->set_param(PatchParam::Hold1, (uint8_t) 0, (int8_t)_id);
+       } else {
+-	_settings->set_param(PatchParam::Hold1, (uint8_t) 1, _id);
++	_settings->set_param(PatchParam::Hold1, (uint8_t) 1, (int8_t)_id);
+       }
+ 
+       for (auto &n : _notes)
+@@ -383,17 +383,17 @@ int Part::control_change(uint8_t msgId, uint8_t value)
+   } else if (msgId == 65) {                            // Portamento
+     if (_settings->get_param(PatchParam::RxPortamento, _id)) {
+       if (value < 64)
+-	_settings->set_param(PatchParam::Portamento, (uint8_t)0,_id);
++	_settings->set_param(PatchParam::Portamento, (uint8_t)0, (int8_t)_id);
+       else
+-	_settings->set_param(PatchParam::Portamento, (uint8_t)1,_id);
++	_settings->set_param(PatchParam::Portamento, (uint8_t)1, (int8_t)_id);
+     }
+ 
+   } else if (msgId == 66) {                            // Sostenuto
+     if (_settings->get_param(PatchParam::RxSostenuto, _id)) {
+       if (value < 64)
+-	_settings->set_param(PatchParam::Sostenuto, (uint8_t)0,_id);
++	_settings->set_param(PatchParam::Sostenuto, (uint8_t)0, (int8_t)_id);
+       else
+-	_settings->set_param(PatchParam::Sostenuto, (uint8_t)1,_id);
++	_settings->set_param(PatchParam::Sostenuto, (uint8_t)1, (int8_t)_id);
+ 
+       for (auto &n : _notes)
+ 	n->sustain(_settings->get_param(PatchParam::Sostenuto, _id));
+@@ -402,9 +402,9 @@ int Part::control_change(uint8_t msgId, uint8_t value)
+   } else if (msgId == 67) {                            // Soft
+     if (_settings->get_param(PatchParam::RxSoft, _id)) {
+       if (value < 64)
+-	_settings->set_param(PatchParam::Soft, (uint8_t)0,_id);
++	_settings->set_param(PatchParam::Soft, (uint8_t)0, (int8_t)_id);
+       else
+-	_settings->set_param(PatchParam::Soft, (uint8_t)1,_id);
++	_settings->set_param(PatchParam::Soft, (uint8_t)1, (int8_t)_id);
+     }
+ 
+   } else if (msgId == 84) {                            // Portamento control
+diff --git a/libemusc/src/reverb.cc b/libemusc/src/reverb.cc
+index 6c3ba2c..8881c55 100644
+--- a/libemusc/src/reverb.cc
++++ b/libemusc/src/reverb.cc
+@@ -26,6 +26,75 @@
+ namespace EmuSC {
+ 
+ 
++// Out-of-line definitions for the static const data members declared with
++// in-class initializers in reverb.h. Declaring them as non-inline static const
++// (instead of implicit-inline static constexpr) guarantees they are emitted as
++// real exported symbols, which a minimal embedded unit loader (drumlogue)
++// requires at load time.
++const Reverb::_CharacterRegs Reverb::_crDelayBase{
++    { 0x0000, 0x0001, 0x0003, 0x0005, 0x0007, 0x0009, 0x1c16, 0x1c16, 0x000b,
++      0x000d, 0x1c16, 0x1c16},
++    { 0x000f, 0x0011, 0x1c16, 0x1c16, 0x0013, 0x0015, 0x1c16, 0x1c16, 0x1c16},
++    0x1000, 0x0000, 0x0000, 0x0000, 0x01e1
++  };
++const Reverb::_CharacterRegs * const Reverb::_charRegs[6]{ &_crRoom1, &_crRoom2, &_crRoom3, &_crHall1, &_crHall2, &_crPlate };
++const uint8_t Reverb::_timeTargetLUT[128]{
++      0,   1,   3,   5,   7,   8,  10,  12,
++     14,  15,  17,  19,  21,  23,  24,  26,
++     28,  30,  31,  33,  35,  37,  39,  40,
++     42,  44,  46,  47,  49,  51,  53,  54,
++     56,  58,  60,  62,  63,  65,  67,  69,
++     70,  72,  74,  76,  78,  79,  81,  83,
++     85,  86,  88,  90,  92,  93,  95,  97,
++     99, 101, 102, 104, 106, 108, 109, 111,
++    113, 115, 117, 118, 120, 122, 124, 125,
++    127, 129, 131, 133, 134, 136, 138, 140,
++    141, 143, 145, 147, 148, 150, 152, 154,
++    156, 157, 159, 161, 163, 164, 166, 168,
++    170, 172, 173, 175, 177, 179, 180, 182,
++    184, 186, 187, 189, 191, 191, 191, 191,
++    191, 191, 191, 191, 191, 191, 191, 191,
++    191, 191, 191, 191, 191, 191, 191, 191
++  };
++const Reverb::_CharacterRegs Reverb::_crRoom1{
++    { 0x0000, 0x0143, 0x0232, 0x02c1, 0x02c2, 0x03b9, 0x02c1, 0x02c1, 0x06f4,
++      0x08ee, 0x0c9c, 0x0a09 },
++    { 0x0f8d, 0x1098, 0x112e, 0x1289, 0x1417, 0x15ea, 0x16ef, 0x194f, 0x1c07},
++    0x0820, 0x0000, 0xe020, 0x10e6, 0x1fee
++  };
++const Reverb::_CharacterRegs Reverb::_crRoom2{
++    { 0x0000, 0x0395, 0x050f, 0x057e, 0x05cb, 0x0865, 0x0590, 0x0590, 0x0fdf,
++      0x130d, 0x1556, 0x1a74},
++    { 0x1c31, 0x1f18, 0x20f6, 0x2526, 0x2771, 0x2a7f, 0x2cb1, 0x319c, 0x3348},
++    0x0820, 0x0000, 0xe020, 0x08e1, 0x1fee
++  };
++const Reverb::_CharacterRegs Reverb::_crRoom3{
++    { 0x0000, 0x0395, 0x050f, 0x057e, 0x05cb, 0x0865, 0x0590, 0x0590, 0x0fdf,
++      0x130d, 0x1556, 0x1a74},
++    { 0x1c31, 0x1f18, 0x20f6, 0x2526, 0x2771, 0x2a7f, 0x2cb1, 0x319c, 0x3348},
++    0x0820, 0x0000, 0xe020, 0x1fee, 0x1fee
++  };
++const Reverb::_CharacterRegs Reverb::_crHall1{
++    { 0x0000, 0x0395, 0x050f, 0x057e, 0x05cb, 0x0865, 0x0a43, 0x0e73, 0x0fdf,
++      0x130d, 0x1556, 0x1a74},
++    { 0x1c31, 0x1f18, 0x212e, 0x25da, 0x2771, 0x2a7f, 0x2cb1, 0x319c, 0x3348},
++    0x1020, 0x0000, 0xe020, 0x1fee, 0x1fee
++  };
++const Reverb::_CharacterRegs Reverb::_crHall2{
++    { 0x0000, 0x039e, 0x051b, 0x058b, 0x058c, 0x0892, 0x0abe, 0x0f9d, 0x1145,
++      0x14fb, 0x17a5, 0x1d9f },
++    { 0x1fa6, 0x2302, 0x256c, 0x2ad5, 0x2cac, 0x3039, 0x31b9, 0x36ff, 0x37fe},
++    0x0820, 0x0020, 0xe020, 0x1fee, 0x1fee
++  };
++const Reverb::_CharacterRegs Reverb::_crPlate{
++    { 0x0000, 0x0143, 0x0232, 0x02c1, 0x02c2, 0x03b9, 0x0584, 0x0443, 0x06f4,
++      0x08ee, 0x0c9c, 0x0a09},
++    { 0x0f8d, 0x1098, 0x112e, 0x1289, 0x1417, 0x15ea, 0x16ef, 0x194f, 0x1c07},
++    0x0820, 0x0020, 0xe020, 0x08e1, 0x10e6
++  };
++
++
++
+ Reverb::Reverb(Settings *settings)
+   : _settings(settings),
+     _sweepIndex(0),
+diff --git a/libemusc/src/reverb.h b/libemusc/src/reverb.h
+index c2d0858..5a1013e 100644
+--- a/libemusc/src/reverb.h
++++ b/libemusc/src/reverb.h
+@@ -72,57 +72,21 @@ private:
+   _CharacterRegs _activeCharRegs;
+ 
+   // Measured character regiser sets (delay and panning delay share regisers)
+-  static constexpr _CharacterRegs _crRoom1 = {
+-    { 0x0000, 0x0143, 0x0232, 0x02c1, 0x02c2, 0x03b9, 0x02c1, 0x02c1, 0x06f4,
+-      0x08ee, 0x0c9c, 0x0a09 },
+-    { 0x0f8d, 0x1098, 0x112e, 0x1289, 0x1417, 0x15ea, 0x16ef, 0x194f, 0x1c07},
+-    0x0820, 0x0000, 0xe020, 0x10e6, 0x1fee
+-  };
++  static const _CharacterRegs _crRoom1;
+ 
+-  static constexpr _CharacterRegs _crRoom2 = {
+-    { 0x0000, 0x0395, 0x050f, 0x057e, 0x05cb, 0x0865, 0x0590, 0x0590, 0x0fdf,
+-      0x130d, 0x1556, 0x1a74},
+-    { 0x1c31, 0x1f18, 0x20f6, 0x2526, 0x2771, 0x2a7f, 0x2cb1, 0x319c, 0x3348},
+-    0x0820, 0x0000, 0xe020, 0x08e1, 0x1fee
+-  };
++  static const _CharacterRegs _crRoom2;
+ 
+-  static constexpr _CharacterRegs _crRoom3 = {
+-    { 0x0000, 0x0395, 0x050f, 0x057e, 0x05cb, 0x0865, 0x0590, 0x0590, 0x0fdf,
+-      0x130d, 0x1556, 0x1a74},
+-    { 0x1c31, 0x1f18, 0x20f6, 0x2526, 0x2771, 0x2a7f, 0x2cb1, 0x319c, 0x3348},
+-    0x0820, 0x0000, 0xe020, 0x1fee, 0x1fee
+-  };
++  static const _CharacterRegs _crRoom3;
+ 
+-  static constexpr _CharacterRegs _crHall1 = {
+-    { 0x0000, 0x0395, 0x050f, 0x057e, 0x05cb, 0x0865, 0x0a43, 0x0e73, 0x0fdf,
+-      0x130d, 0x1556, 0x1a74},
+-    { 0x1c31, 0x1f18, 0x212e, 0x25da, 0x2771, 0x2a7f, 0x2cb1, 0x319c, 0x3348},
+-    0x1020, 0x0000, 0xe020, 0x1fee, 0x1fee
+-  };
++  static const _CharacterRegs _crHall1;
+ 
+-  static constexpr _CharacterRegs _crHall2 = {
+-    { 0x0000, 0x039e, 0x051b, 0x058b, 0x058c, 0x0892, 0x0abe, 0x0f9d, 0x1145,
+-      0x14fb, 0x17a5, 0x1d9f },
+-    { 0x1fa6, 0x2302, 0x256c, 0x2ad5, 0x2cac, 0x3039, 0x31b9, 0x36ff, 0x37fe},
+-    0x0820, 0x0020, 0xe020, 0x1fee, 0x1fee
+-  };
++  static const _CharacterRegs _crHall2;
+ 
+-  static constexpr _CharacterRegs _crPlate = {
+-    { 0x0000, 0x0143, 0x0232, 0x02c1, 0x02c2, 0x03b9, 0x0584, 0x0443, 0x06f4,
+-      0x08ee, 0x0c9c, 0x0a09},
+-    { 0x0f8d, 0x1098, 0x112e, 0x1289, 0x1417, 0x15ea, 0x16ef, 0x194f, 0x1c07},
+-    0x0820, 0x0020, 0xe020, 0x08e1, 0x10e6
+-  };
++  static const _CharacterRegs _crPlate;
+ 
+-  static constexpr _CharacterRegs _crDelayBase = {
+-    { 0x0000, 0x0001, 0x0003, 0x0005, 0x0007, 0x0009, 0x1c16, 0x1c16, 0x000b,
+-      0x000d, 0x1c16, 0x1c16},
+-    { 0x000f, 0x0011, 0x1c16, 0x1c16, 0x0013, 0x0015, 0x1c16, 0x1c16, 0x1c16},
+-    0x1000, 0x0000, 0x0000, 0x0000, 0x01e1
+-  };
++  static const _CharacterRegs _crDelayBase;
+ 
+-  static constexpr const _CharacterRegs *_charRegs[6] =
+-    { &_crRoom1, &_crRoom2, &_crRoom3, &_crHall1, &_crHall2, &_crPlate };
++static const _CharacterRegs * const _charRegs[6];
+ 
+   float _preLpfState;
+   float _preLpfA, _preLpfB;
+@@ -155,24 +119,7 @@ private:
+   }
+ 
+   // Measured time values, equal for all 6 non-delay characters
+-  static constexpr uint8_t _timeTargetLUT[128] = {
+-      0,   1,   3,   5,   7,   8,  10,  12,
+-     14,  15,  17,  19,  21,  23,  24,  26,
+-     28,  30,  31,  33,  35,  37,  39,  40,
+-     42,  44,  46,  47,  49,  51,  53,  54,
+-     56,  58,  60,  62,  63,  65,  67,  69,
+-     70,  72,  74,  76,  78,  79,  81,  83,
+-     85,  86,  88,  90,  92,  93,  95,  97,
+-     99, 101, 102, 104, 106, 108, 109, 111,
+-    113, 115, 117, 118, 120, 122, 124, 125,
+-    127, 129, 131, 133, 134, 136, 138, 140,
+-    141, 143, 145, 147, 148, 150, 152, 154,
+-    156, 157, 159, 161, 163, 164, 166, 168,
+-    170, 172, 173, 175, 177, 179, 180, 182,
+-    184, 186, 187, 189, 191, 191, 191, 191,
+-    191, 191, 191, 191, 191, 191, 191, 191,
+-    191, 191, 191, 191, 191, 191, 191, 191
+-  };
++static const uint8_t _timeTargetLUT[128];
+ 
+ };
+ 
+diff --git a/libemusc/src/synth.cc b/libemusc/src/synth.cc
+index 1445030..9959b84 100644
+--- a/libemusc/src/synth.cc
++++ b/libemusc/src/synth.cc
+@@ -39,6 +39,10 @@
+ 
+ namespace EmuSC {
+ 
++#ifndef EMUSC_MAX_PARTS
++#define EMUSC_MAX_PARTS 16
++#endif
++
+ Synth::Synth(ControlRom &controlRom, WaveRom &waveRom, SoundMap map)
+   : _sampleRate(0),
+     _channels(0),
+@@ -82,7 +86,7 @@ Synth::~Synth()
+ 
+ void Synth::_init_parts(void)
+ {
+-  for (int i = 0; i < 16; i++)
++  for (int i = 0; i < EMUSC_MAX_PARTS; i++)
+     _parts.emplace_back(i, _settings, _ctrlRom, _waveRom);
+ }
+ 
+diff --git a/libemusc/src/system_effects.cc b/libemusc/src/system_effects.cc
+index fa3e9ee..18fcdec 100644
+--- a/libemusc/src/system_effects.cc
++++ b/libemusc/src/system_effects.cc
+@@ -38,8 +38,12 @@ SystemEffects::SystemEffects(Settings *settings)
+     _chorus(NULL),
+     _reverb(NULL)
+ {
++#ifndef EMUSC_NO_CHORUS
+   _chorus = new Chorus(settings);
++#endif
++#ifndef EMUSC_NO_REVERB
+   _reverb = new Reverb(settings);
++#endif
+ 
+   update();
+ }
+@@ -62,15 +66,27 @@ int SystemEffects::apply(std::array<std::array<float, 256>, 2> &chorusBus,
+ 
+   for (int i = 0; i < 256; i ++) {
+     float cSample[2] = { 0, 0 };
++#ifndef EMUSC_NO_CHORUS
+     float cInput = 0.5f * (chorusBus[0][i] + chorusBus[1][i]);
+     _chorus->process_sample(cInput, cSample, &cReverbSend);
++#else
++    (void) chorusBus;
++    cReverbSend = 0;
++#endif
+ 
+     chorusOut[0][i] = cSample[0];
+     chorusOut[1][i] = cSample[1];
+ 
+     float rSample[2] = { 0, 0 };
++#ifndef EMUSC_NO_REVERB
++    // For hosts with a reverb of their own: the reverb network is the most
++    // expensive part of the system effects, and the bus is still summed.
+     float rInput = 0.5f * (reverbBus[0][i] + reverbBus[1][i]) + cReverbSend;
+     _reverb->process_sample(rInput, rSample);
++#else
++    (void) reverbBus;
++    (void) cReverbSend;
++#endif
+ 
+     reverbOut[0][i] = rSample[0];
+     reverbOut[1][i] = rSample[1];
+@@ -82,8 +98,12 @@ int SystemEffects::apply(std::array<std::array<float, 256>, 2> &chorusBus,
+ 
+ void SystemEffects::update(void)
+ {
++#ifndef EMUSC_NO_CHORUS
+   _chorus->update();
++#endif
++#ifndef EMUSC_NO_REVERB
+   _reverb->update();
++#endif
+ }
+ 
+ } //  namespace EmuSC
+diff --git a/libemusc/src/wave_oscillator.cc b/libemusc/src/wave_oscillator.cc
+index 8ca4564..c103828 100644
+--- a/libemusc/src/wave_oscillator.cc
++++ b/libemusc/src/wave_oscillator.cc
+@@ -26,12 +26,71 @@
+ namespace EmuSC {
+ 
+ 
++// Out-of-line definition for the static const member declared with an in-class
++// initializer in wave_oscillator.h (see reverb.cc for rationale).
++const uint16_t WaveOscillator::_interpolationLUT[3][128]{
++    // c0 (cumulative weight of delta0)
++    3385, 3401, 3417, 3432, 3448, 3463, 3478, 3492,
++    3506, 3521, 3534, 3548, 3562, 3575, 3588, 3601,
++    3614, 3626, 3638, 3650, 3662, 3673, 3685, 3696,
++    3707, 3718, 3728, 3739, 3749, 3759, 3768, 3778,
++    3787, 3796, 3805, 3814, 3823, 3831, 3839, 3847,
++    3855, 3863, 3870, 3878, 3885, 3892, 3899, 3905,
++    3912, 3918, 3924, 3930, 3936, 3942, 3948, 3953,
++    3958, 3963, 3968, 3973, 3978, 3983, 3987, 3991,
++    3995, 4000, 4004, 4007, 4011, 4015, 4018, 4022,
++    4025, 4028, 4031, 4034, 4037, 4040, 4042, 4045,
++    4047, 4050, 4052, 4054, 4057, 4059, 4061, 4063,
++    4064, 4066, 4068, 4070, 4071, 4073, 4074, 4076,
++    4077, 4078, 4079, 4081, 4082, 4083, 4084, 4085,
++    4086, 4086, 4087, 4088, 4089, 4089, 4090, 4091,
++    4091, 4092, 4092, 4093, 4093, 4094, 4094, 4094,
++    4094, 4095, 4095, 4095, 4095, 4095, 4095, 4095,
++
++    // c1 (cumulative weight of delta1)
++    710,  726,  742,  758,  775,  792,  809,  826,
++    844,  861,  879,  897,  915,  933,  952,  971,
++    990, 1009, 1028, 1047, 1067, 1087, 1106, 1126,
++    1147, 1167, 1188, 1208, 1229, 1250, 1271, 1292,
++    1314, 1335, 1357, 1379, 1400, 1423, 1445, 1467,
++    1489, 1512, 1534, 1557, 1580, 1602, 1625, 1648,
++    1671, 1695, 1718, 1741, 1764, 1788, 1811, 1835,
++    1858, 1882, 1906, 1929, 1953, 1977, 2000, 2024,
++    2048, 2069, 2095, 2119, 2143, 2166, 2190, 2214,
++    2237, 2261, 2284, 2308, 2331, 2355, 2378, 2401,
++    2425, 2448, 2471, 2494, 2517, 2539, 2562, 2585,
++    2607, 2630, 2652, 2674, 2696, 2718, 2740, 2762,
++    2783, 2805, 2826, 2847, 2868, 2889, 2910, 2931,
++    2951, 2971, 2991, 3011, 3031, 3051, 3070, 3089,
++    3108, 3127, 3146, 3164, 3182, 3200, 3218, 3236,
++    3253, 3271, 3288, 3304, 3321, 3338, 3354, 3370,
++
++    // c2 (cumulative weight of delta2)
++     0,    0,    0,    1,    1,    1,    2,    2,
++     3,    3,    3,    4,    4,    5,    5,    6,
++     6,    7,    8,    8,    9,   10,   10,   11,
++    12,   13,   14,   15,   16,   17,   18,   19,
++    20,   22,   23,   24,   26,   27,   29,   30,
++    32,   34,   36,   38,   40,   42,   44,   46,
++    49,   51,   53,   56,   59,   62,   65,   68,
++    71,   74,   77,   81,   84,   88,   92,   96,
++   100,  104,  109,  113,  118,  122,  127,  132,
++   137,  143,  148,  154,  160,  165,  171,  178,
++   184,  191,  197,  204,  211,  219,  226,  234,
++   241,  249,  257,  266,  274,  283,  292,  301,
++   310,  319,  329,  339,  349,  359,  369,  380,
++   391,  402,  413,  424,  436,  448,  460,  472,
++   484,  497,  510,  523,  536,  549,  563,  577,
++   591,  605,  619,  634,  648,  663,  679,  694
++  };
++
++
+ WaveOscillator::WaveOscillator(ControlRom::Sample *ctrlSample,
+                                std::vector<float> *pcmSamples,
+                                std::function<void(void)> cb)
+   : _pcmSamples(pcmSamples),
+     _phase(0.0f),
+-    _loopMode{ctrlSample->loopMode},
++    _loopMode(static_cast<LoopMode>(ctrlSample->loopMode)),
+     _firstRunCompleteCallback(cb),
+     _firstRunComplete(false)
+ {
+diff --git a/libemusc/src/wave_oscillator.h b/libemusc/src/wave_oscillator.h
+index 16a508f..c5b650c 100644
+--- a/libemusc/src/wave_oscillator.h
++++ b/libemusc/src/wave_oscillator.h
+@@ -81,61 +81,7 @@ private:
+   float _interpolate();
+ 
+   // Lookup table from the Nuked-SC55 project by nukeykt
+-  static constexpr uint16_t _interpolationLUT[3][128] = {
+-    // c0 (cumulative weight of delta0)
+-    3385, 3401, 3417, 3432, 3448, 3463, 3478, 3492,
+-    3506, 3521, 3534, 3548, 3562, 3575, 3588, 3601,
+-    3614, 3626, 3638, 3650, 3662, 3673, 3685, 3696,
+-    3707, 3718, 3728, 3739, 3749, 3759, 3768, 3778,
+-    3787, 3796, 3805, 3814, 3823, 3831, 3839, 3847,
+-    3855, 3863, 3870, 3878, 3885, 3892, 3899, 3905,
+-    3912, 3918, 3924, 3930, 3936, 3942, 3948, 3953,
+-    3958, 3963, 3968, 3973, 3978, 3983, 3987, 3991,
+-    3995, 4000, 4004, 4007, 4011, 4015, 4018, 4022,
+-    4025, 4028, 4031, 4034, 4037, 4040, 4042, 4045,
+-    4047, 4050, 4052, 4054, 4057, 4059, 4061, 4063,
+-    4064, 4066, 4068, 4070, 4071, 4073, 4074, 4076,
+-    4077, 4078, 4079, 4081, 4082, 4083, 4084, 4085,
+-    4086, 4086, 4087, 4088, 4089, 4089, 4090, 4091,
+-    4091, 4092, 4092, 4093, 4093, 4094, 4094, 4094,
+-    4094, 4095, 4095, 4095, 4095, 4095, 4095, 4095,
+-
+-    // c1 (cumulative weight of delta1)
+-    710,  726,  742,  758,  775,  792,  809,  826,
+-    844,  861,  879,  897,  915,  933,  952,  971,
+-    990, 1009, 1028, 1047, 1067, 1087, 1106, 1126,
+-    1147, 1167, 1188, 1208, 1229, 1250, 1271, 1292,
+-    1314, 1335, 1357, 1379, 1400, 1423, 1445, 1467,
+-    1489, 1512, 1534, 1557, 1580, 1602, 1625, 1648,
+-    1671, 1695, 1718, 1741, 1764, 1788, 1811, 1835,
+-    1858, 1882, 1906, 1929, 1953, 1977, 2000, 2024,
+-    2048, 2069, 2095, 2119, 2143, 2166, 2190, 2214,
+-    2237, 2261, 2284, 2308, 2331, 2355, 2378, 2401,
+-    2425, 2448, 2471, 2494, 2517, 2539, 2562, 2585,
+-    2607, 2630, 2652, 2674, 2696, 2718, 2740, 2762,
+-    2783, 2805, 2826, 2847, 2868, 2889, 2910, 2931,
+-    2951, 2971, 2991, 3011, 3031, 3051, 3070, 3089,
+-    3108, 3127, 3146, 3164, 3182, 3200, 3218, 3236,
+-    3253, 3271, 3288, 3304, 3321, 3338, 3354, 3370,
+-
+-    // c2 (cumulative weight of delta2)
+-     0,    0,    0,    1,    1,    1,    2,    2,
+-     3,    3,    3,    4,    4,    5,    5,    6,
+-     6,    7,    8,    8,    9,   10,   10,   11,
+-    12,   13,   14,   15,   16,   17,   18,   19,
+-    20,   22,   23,   24,   26,   27,   29,   30,
+-    32,   34,   36,   38,   40,   42,   44,   46,
+-    49,   51,   53,   56,   59,   62,   65,   68,
+-    71,   74,   77,   81,   84,   88,   92,   96,
+-   100,  104,  109,  113,  118,  122,  127,  132,
+-   137,  143,  148,  154,  160,  165,  171,  178,
+-   184,  191,  197,  204,  211,  219,  226,  234,
+-   241,  249,  257,  266,  274,  283,  292,  301,
+-   310,  319,  329,  339,  349,  359,  369,  380,
+-   391,  402,  413,  424,  436,  448,  460,  472,
+-   484,  497,  510,  523,  536,  549,  563,  577,
+-   591,  605,  619,  634,  648,  663,  679,  694
+-  };
++static const uint16_t _interpolationLUT[3][128];
+ };
+ 
+ }
