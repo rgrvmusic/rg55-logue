@@ -10,8 +10,7 @@ PROJECT_TYPE := synth
 #
 
 EMUSC_SRC   ?= /emusc/libemusc/src
-SYNTH_PATH  ?= /rfx/synth
-COMMON_PATH ?= /rfx/common
+COMMON_PATH ?= /rg55/common
 
 CSRC   = header.c
 CXXSRC = unit.cc
@@ -39,9 +38,7 @@ CXXSRC += $(EMUSC_SRC)/wave_rom.cc
 #
 
 UINCDIR = $(EMUSC_SRC)
-# For the shared unit_note_queue.h, which lives in synth/.
-UINCDIR += $(SYNTH_PATH)
-# For the shared rg55_log.h, which the microKorg2 variant uses too.
+# For rg55_log.h and unit_note_queue.h, which the microKORG2 unit uses too.
 UINCDIR += $(COMMON_PATH)
 
 ##############################################################################
@@ -81,7 +78,7 @@ UDEFS += -DEMUSC_NO_REVERB
 # eight reverbs feeding the same bus, and the drumlogue's own chorus is on the
 # other side of this unit.
 UDEFS += -DEMUSC_NO_CHORUS
-# Uncomment to write rg55.log in userfs: init, then a summary of the render
+# Write rg55.log to the userfs: init, then a summary of the render
 # (slowest block, late blocks, peak) when the unit is suspended or torn down.
 # Nothing is logged while audio runs, so a build with this on sounds the same.
 UDEFS += -DRG55_DEBUG

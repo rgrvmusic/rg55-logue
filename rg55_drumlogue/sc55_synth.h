@@ -1,4 +1,13 @@
 #pragma once
+/**
+ * RGSC55 - drumlogue synth unit
+ *
+ * A monophonic libEmuSC SC-55 player: part 0, in mono mode. A new note stops
+ * the one sounding, and what is stopped is faded out over one block first,
+ * because cutting it at whatever amplitude it has is a step in the waveform (a
+ * tenth of full scale at 25 ms retriggers). A gate holds its note until the
+ * gate ends.
+ */
 
 #include <cstddef>
 #include <cstdint>

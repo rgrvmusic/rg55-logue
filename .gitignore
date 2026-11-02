@@ -1,0 +1,9 @@
+# build output
+bin/
+build/
+.dep/
+rg55_drumlogue/*.drmlgunit
+rg55_microkorg2/*.mk2unit
+
+# my progress tracking notes
+task*.md
